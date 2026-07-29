@@ -1,0 +1,5 @@
+# config.local.yaml.example — 本地环境配置模板
+# 复制为 config.local.yaml 并修改为你的本地路径
+
+# Obsidian 知识库根目录路径（必填）
+vault_path: "/path/to/your/obsidian/vault/AI"

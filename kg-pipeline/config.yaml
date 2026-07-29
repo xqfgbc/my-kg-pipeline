@@ -1,0 +1,75 @@
+# ============================================================
+# 知识图谱管道配置文件
+# ============================================================
+
+# 知识库根目录（Obsidian vault 路径）
+# ⚠️ 本地路径请在 config.local.yaml 中设置，不要修改此文件
+# 优先级: 环境变量 KG_VAULT_PATH > config.local.yaml > 此默认值
+vault_path: ""
+
+# 回写 .md 文件时是否创建备份 (.bak 文件)
+create_backup: true
+
+# === wiki-link 自动注入阈值 ===
+# Jaccard 相似度 >= auto_inject_threshold → 自动注入 [[wiki-links]]
+auto_inject_threshold: 0.5
+# Jaccard 相似度 >= suggest_threshold → 仅建议人工审核（记录在 review 列表中）
+suggest_threshold: 0.3
+
+# === 排除模式 ===
+# 扫描时跳过的目录（相对路径前缀）
+exclude_dirs:
+  - ".obsidian"
+
+# 扫描时跳过的文件模式（glob）
+exclude_patterns:
+  - "**/asset/**"
+
+# === 实体别名映射 ===
+# 提取实体时，将变体名称归一化到规范名称
+entity_aliases:
+  "AgenticAI":
+    - "Agentic AI"
+    - "Agentic"
+    - "agentic"
+    - "Agentic Workflows"
+    - "Agentic Workflow"
+  "自主化运维":
+    - "Autonomous IT Operations"
+    - "Autonomous Operations"
+    - "Autonomous"
+  "Observability":
+    - "可观测性"
+    - "observability"
+    - "全栈可观测性"
+    - "Full-Stack Observability"
+    - "企业可观测性"
+  "ServiceNow":
+    - "SNOW"
+    - "servicenow"
+    - "ServiceNow ITOM"
+    - "Now Platform"
+  "Dynatrace":
+    - "Dynatrace Davis AI"
+    - "Davis AI"
+    - "Smartscape"
+  "AIOps":
+    - "AI Operations"
+    - "AI驱动的运维"
+    - "AI-Powered IT Operations"
+    - "AI Ops"
+  "MTTR":
+    - "Mean-Time-to-Resolve"
+    - "平均解决时间"
+  "GenAI":
+    - "Generative AI"
+    - "生成式AI"
+    - "LLM"
+  "IT运维":
+    - "IT Operations"
+    - "IT Ops"
+    - "IT运营"
+  "DevOps":
+    - "Dev Ops"
+  "SRE":
+    - "Site Reliability Engineering"

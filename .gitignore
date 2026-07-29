@@ -1,0 +1,24 @@
+# 本地配置文件（含本地路径，不提交）
+config.local.yaml
+
+# Claude Code 本地设置
+.claude/
+
+# 生成数据（由管道运行时生成）
+kg-pipeline-data/
+.understand-anything/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
