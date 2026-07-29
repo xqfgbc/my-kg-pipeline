@@ -3,22 +3,36 @@
 知识库检索器 —— 根据用户问题从图谱和原文中检索相关知识。
 用法: python3 kg-pipeline/retrieval.py "如何实现AIOps"
 输出: JSON，包含匹配的实体、关联概念、原文摘要
+
+v2 优化:
+  - jieba 分词替代 n-gram 暴力切词
+  - EntityResolver 双语别名扩展（中→英 / 英→中）
+  - TF-IDF + cosine similarity 替代子串匹配
 """
 import sys
 import json
 import os
 import re
+import yaml
 from pathlib import Path
 from typing import List, Dict, Any, Set, Tuple
+
+import jieba
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KG_DIR = os.path.dirname(SCRIPT_DIR)
 GRAPH_PATH = os.path.join(KG_DIR, "kg-pipeline-data", "graph.json")
+CONFIG_PATH = os.path.join(KG_DIR, "kg-pipeline", "config.yaml")
 
 # 动态加载本地配置
 sys.path.insert(0, KG_DIR)
 from kg_pipeline_config import get_vault_path
 VAULT_PATH = get_vault_path()
+
+# 环境变量控制回退到旧版
+USE_LEGACY = os.environ.get("KG_LEGACY_RETRIEVAL", "") == "1"
 
 
 def load_graph() -> Dict:
@@ -26,47 +40,138 @@ def load_graph() -> Dict:
         return json.load(f)
 
 
+# ============================================================
+# 优化 1: jieba 中文分词
+# ============================================================
+
 def tokenize_query(query: str) -> List[str]:
-    """中文+英文混合分词，提取关键词。"""
-    # 提取中文词（2-6字连续组合）和英文单词
+    """jieba 中文分词 + 英文词提取 + 原始全文。"""
     tokens = []
-    # 英文词
+
+    # 1. jieba 精确模式分词（处理中文）
+    chinese_tokens = list(jieba.cut(query))
+    tokens.extend(t for t in chinese_tokens if len(t.strip()) >= 2)
+
+    # 2. 英文词提取
     eng_words = re.findall(r'[A-Za-z]+', query)
     tokens.extend(w.lower() for w in eng_words if len(w) >= 2)
 
-    # 中文词（简单 sliding window）
-    chinese_chars = re.findall(r'[一-鿿]+', query)
-    for chunk in chinese_chars:
-        for wlen in range(2, min(7, len(chunk) + 1)):
-            for i in range(len(chunk) - wlen + 1):
-                tokens.append(chunk[i:i + wlen])
+    # 3. 2-gram 组合（保留词组能力）
+    for i in range(len(chinese_tokens) - 1):
+        bigram = chinese_tokens[i] + chinese_tokens[i + 1]
+        if len(bigram.strip()) >= 2:
+            tokens.append(bigram)
 
-    # 加入原始查询全文
+    # 4. 原始查询全文（精确匹配回退）
     tokens.append(query.lower())
+
     return list(set(tokens))
 
 
-def match_entities(graph: Dict, tokens: List[str], top_k: int = 10) -> List[Dict]:
-    """匹配实体节点，按相关度排序。"""
-    entities = [n for n in graph['nodes'] if n['type'] in ('entity', 'tag', 'topic')]
-    scored = []
+# ============================================================
+# 优化 3: 双语别名扩展（复用 EntityResolver 现有别名）
+# ============================================================
 
-    for e in entities:
-        name = (e.get('canonical_name') or e.get('name') or '').lower()
-        score = 0
-        for token in tokens:
-            if token in name:
-                score += len(token) / len(name)
-            # 别名匹配
-            for p in e.get('provenance', []):
-                if token in str(p).lower():
-                    score += 0.1
+def _load_alias_index() -> Dict[str, List[str]]:
+    """从 config.yaml 加载实体别名映射，构建反向索引。"""
+    alias_index = {}
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            config = yaml.safe_load(f) or {}
+        entity_aliases = config.get('entity_aliases', {})
+        for canonical, aliases in entity_aliases.items():
+            # 规范名 → 自身
+            alias_index[canonical.lower().strip()] = canonical
+            # 别名 → 规范名
+            for alias in aliases:
+                key = alias.lower().strip()
+                if key not in alias_index:
+                    alias_index[key] = canonical
+    except Exception:
+        pass
+    return alias_index
 
-        if score > 0:
-            scored.append((score, e))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in scored[:top_k]]
+# 模块加载时构建别名索引
+_ALIAS_INDEX = _load_alias_index()
+
+
+def expand_bilingual(tokens: List[str]) -> List[str]:
+    """利用别名反向索引做中英双语扩展。
+
+    对每个 token，如果命中 alias_index，
+    扩展出 canonical name + 同组所有别名。
+    """
+    expanded = list(tokens)
+    for token in tokens:
+        key = token.lower().strip()
+        if key in _ALIAS_INDEX:
+            canonical = _ALIAS_INDEX[key]
+            expanded.append(canonical)
+            # 如果 config 中有同组别名，也加入
+            # （此处仅扩展规范名，别名在 TF-IDF entity_texts 中覆盖）
+    return list(set(expanded))
+
+
+# ============================================================
+# 优化 2: TF-IDF + cosine similarity 实体匹配
+# ============================================================
+
+class EntityMatcher:
+    """基于 TF-IDF 的实体匹配器。"""
+
+    def __init__(self, graph: Dict):
+        self.entity_nodes = [
+            n for n in graph['nodes']
+            if n['type'] in ('entity', 'tag', 'topic')
+        ]
+        self.entity_names = [e.get('canonical_name', e['id']) for e in self.entity_nodes]
+
+        # 为每个实体构建"富文本"：规范名 + 所有别名拼接
+        self.entity_texts = []
+        for e in self.entity_nodes:
+            canonical = e.get('canonical_name', e['id'])
+            aliases = self._gather_aliases(canonical)
+            self.entity_texts.append(f"{canonical} {' '.join(aliases)}")
+
+        # TF-IDF 向量化
+        self.vectorizer = TfidfVectorizer(
+            analyzer='char_wb',
+            ngram_range=(2, 4),
+            max_features=5000,
+        )
+        self.entity_matrix = self.vectorizer.fit_transform(self.entity_texts)
+
+    def _gather_aliases(self, canonical: str) -> List[str]:
+        """收集实体的所有别名（从 alias_index 反向查找）。"""
+        aliases = []
+        for alias_key, can_name in _ALIAS_INDEX.items():
+            if can_name == canonical and alias_key != canonical.lower():
+                aliases.append(alias_key)
+        return aliases
+
+    def search(self, query_tokens: List[str], top_k: int = 8) -> List[Dict]:
+        """TF-IDF + cosine 匹配实体。"""
+        query_text = ' '.join(query_tokens)
+        query_vec = self.vectorizer.transform([query_text])
+        scores = cosine_similarity(query_vec, self.entity_matrix).flatten()
+        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+
+        results = []
+        for idx, score in ranked[:top_k]:
+            if score > 0:
+                results.append({
+                    'entity': self.entity_nodes[idx],
+                    'score': float(score),
+                })
+        return results
+
+
+def match_entities(graph: Dict, tokens: List[str], top_k: int = 8) -> List[Dict]:
+    """TF-IDF 版实体匹配（兼容旧接口）。"""
+    matcher = EntityMatcher(graph)
+    matched = matcher.search(tokens, top_k=top_k)
+    return [m['entity'] for m in matched]
 
 
 def get_related_entities(graph: Dict, entity_id: str, top_k: int = 8) -> List[Tuple[str, float]]:
@@ -215,27 +320,37 @@ def main():
     query = ' '.join(sys.argv[1:])
     graph = load_graph()
 
-    # Step 1: 分词并匹配实体
-    tokens = tokenize_query(query)
-    matched = match_entities(graph, tokens, top_k=8)
+    if USE_LEGACY:
+        # 旧版回退（可通过 KG_LEGACY_RETRIEVAL=1 环境变量触发）
+        tokens = _legacy_tokenize(query)
+        matched = _legacy_match_entities(graph, tokens, top_k=8)
+    else:
+        # Step 1: jieba 分词 [优化1]
+        tokens = tokenize_query(query)
 
-    # Step 2: 对每个匹配实体找到关联实体
+        # Step 2: 双语别名扩展 [优化3]
+        tokens = expand_bilingual(tokens)
+
+        # Step 3: TF-IDF + cosine 匹配 [优化2]
+        matched = match_entities(graph, tokens, top_k=8)
+
+    # Step 4: 对每个匹配实体找到关联实体（图谱共现边遍历，不变）
     entity_ids = [e['id'] for e in matched]
     all_related = {}
-    for eid in entity_ids[:4]:  # top-4 实体做关联扩展
+    for eid in entity_ids[:4]:
         related = get_related_entities(graph, eid, top_k=5)
         for name, weight in related:
             if name not in all_related or weight > all_related[name]:
                 all_related[name] = weight
 
-    # Step 3: 从原文提取相关摘要
-    search_entity_ids = entity_ids[:6]  # top-6 实体用于溯源
+    # Step 5: 从原文提取相关摘要（provenance 定位 + 正则提取，不变）
+    search_entity_ids = entity_ids[:6]
     passages = extract_passages_from_docs(graph, search_entity_ids, VAULT_PATH)
 
-    # Step 4: 全文搜索补充
+    # Step 6: 全文搜索补充
     fulltext = search_fulltext(query, VAULT_PATH, max_results=3)
 
-    # 组装输出
+    # 组装输出（JSON schema 不变）
     output = {
         "query": query,
         "matched_entities": [
@@ -252,6 +367,43 @@ def main():
     }
 
     print(json.dumps(output, ensure_ascii=False, indent=2))
+
+
+# ============================================================
+# 旧版回退函数（保留，供 KG_LEGACY_RETRIEVAL=1 时使用）
+# ============================================================
+
+def _legacy_tokenize(query: str) -> List[str]:
+    """旧版 n-gram 分词（保留用于回退）."""
+    tokens = []
+    eng_words = re.findall(r'[A-Za-z]+', query)
+    tokens.extend(w.lower() for w in eng_words if len(w) >= 2)
+    chinese_chars = re.findall(r'[一-鿿]+', query)
+    for chunk in chinese_chars:
+        for wlen in range(2, min(7, len(chunk) + 1)):
+            for i in range(len(chunk) - wlen + 1):
+                tokens.append(chunk[i:i + wlen])
+    tokens.append(query.lower())
+    return list(set(tokens))
+
+
+def _legacy_match_entities(graph: Dict, tokens: List[str], top_k: int = 8) -> List[Dict]:
+    """旧版子串匹配（保留用于回退）."""
+    entities = [n for n in graph['nodes'] if n['type'] in ('entity', 'tag', 'topic')]
+    scored = []
+    for e in entities:
+        name = (e.get('canonical_name') or e.get('name') or '').lower()
+        score = 0
+        for token in tokens:
+            if token in name:
+                score += len(token) / len(name)
+            for p in e.get('provenance', []):
+                if token in str(p).lower():
+                    score += 0.1
+        if score > 0:
+            scored.append((score, e))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in scored[:top_k]]
 
 
 if __name__ == '__main__':

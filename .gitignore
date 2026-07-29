@@ -7,6 +7,7 @@ config.local.yaml
 # 生成数据（由管道运行时生成）
 kg-pipeline-data/
 .understand-anything/
+benchmark/
 
 # Python
 __pycache__/
