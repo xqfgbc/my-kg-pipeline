@@ -60,10 +60,38 @@ from output.json_export import export_graph, export_stats_report
 # ============================================================
 
 def load_config() -> Dict[str, Any]:
-    """加载 config.yaml 配置文件。"""
+    """加载并合并 config.yaml + config.aliases.yaml + config.local.yaml 配置。"""
     config_path = os.path.join(SCRIPT_DIR, 'config.yaml')
     with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+
+    # 合并自动发现的别名
+    aliases_path = os.path.join(KG_ROOT, 'config.aliases.yaml')
+    if os.path.exists(aliases_path):
+        with open(aliases_path, 'r', encoding='utf-8') as f:
+            auto = yaml.safe_load(f) or {}
+        auto_aliases = auto.get('entity_aliases', {})
+        if auto_aliases:
+            base = config.get('entity_aliases', {})
+            for canonical, aliases in auto_aliases.items():
+                if canonical in base:
+                    base[canonical] = sorted(set(base[canonical] + aliases))
+                else:
+                    base[canonical] = aliases
+            config['entity_aliases'] = base
+
+    # 合并本地配置（vault_path 等）
+    local_path = os.path.join(KG_ROOT, 'config.local.yaml')
+    if os.path.exists(local_path):
+        with open(local_path, 'r', encoding='utf-8') as f:
+            local = yaml.safe_load(f) or {}
+        config.update({k: v for k, v in local.items() if v is not None})
+
+    # 环境变量覆盖
+    if os.environ.get('KG_VAULT_PATH'):
+        config['vault_path'] = os.environ['KG_VAULT_PATH']
+
+    return config
 
 
 # ============================================================
@@ -433,6 +461,98 @@ def build_graph_from_extractions(
 
 
 # ============================================================
+# 别名自动发现
+# ============================================================
+
+def _has_chinese(text: str) -> bool:
+    """检测文本是否包含中文字符。"""
+    for ch in text:
+        if '一' <= ch <= '鿿' or '㐀' <= ch <= '䶿':
+            return True
+    return False
+
+
+def discover_aliases(
+    extractions: Dict[str, Dict[str, Any]],
+    resolver: EntityResolver,
+    kg: KnowledgeGraph
+) -> Dict[str, List[str]]:
+    """
+    从高精度信号自动发现中英双语别名候选。
+    原则：宁可漏掉，不可混入噪声。所有候选均基于字符串层面的强匹配。
+
+    信号1: 英文词恰好是中文实体名的子串 (如 "AIOps" ⊂ "AIOps演进")
+    信号2: 归一化后精确匹配 (英文 lower+去空格 == 中文对应)
+    """
+    candidates: Dict[str, set] = defaultdict(set)
+
+    all_entities = set()
+    for ext in extractions.values():
+        all_entities.update(ext['all_tags'])
+    zh_entities = {e for e in all_entities if _has_chinese(e)}
+    en_entities = {e for e in all_entities if not _has_chinese(e) and e.isascii() and len(e) >= 3}
+
+    for zh in zh_entities:
+        canonical = resolver.resolve(zh)
+        if canonical != zh:  # 已有映射，跳过
+            continue
+
+        zh_lower = zh.lower()
+        for en in en_entities:
+            en_lower = en.lower()
+
+            # 信号1: 英文字串包含在中文实体中 (如 "KPI" ⊂ "KPI矩阵")
+            if len(en) >= 3 and en_lower in zh_lower:
+                candidates[zh].add(en)
+
+            # 信号2: 归一化精确匹配 (如 "agenticai" == "agenticai")
+            zh_normalized = zh_lower.replace(' ', '').replace('-', '').replace('_', '')
+            en_normalized = en_lower.replace(' ', '').replace('-', '').replace('_', '')
+            if len(en_normalized) >= 4 and zh_normalized == en_normalized:
+                candidates[zh].add(en)
+
+    # 过滤：别名数 >5 的通常是泛化词，仅保留前5个
+    result = {}
+    for zh, en_set in candidates.items():
+        en_list = sorted(en_set)
+        if len(en_list) > 5:
+            en_list = en_list[:5]
+        if en_list:
+            result[zh] = en_list
+
+    return result
+
+
+def save_discovered_aliases(
+    discovered: Dict[str, List[str]],
+    output_path: str
+) -> None:
+    """将发现的别名写入 config.aliases.yaml（保留已有条目，合并新增）。"""
+    existing = {}
+    if os.path.exists(output_path):
+        with open(output_path, 'r') as f:
+            data = yaml.safe_load(f) or {}
+            existing = data.get('entity_aliases', {})
+
+    # 合并：已有 + 新发现
+    merged = dict(existing)
+    for canonical, aliases in discovered.items():
+        if canonical in merged:
+            merged[canonical] = sorted(set(merged[canonical] + aliases))
+        else:
+            merged[canonical] = aliases
+
+    # 写入 YAML
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w') as f:
+        f.write('# config.aliases.yaml — 自动发现的实体别名映射\n')
+        f.write('# 由 pipeline.py 别名自动发现步骤生成，人工审核后可提交到 Git\n')
+        f.write('# 与 config.yaml 中的 entity_aliases 合并加载\n')
+        f.write('\n')
+        yaml.dump({'entity_aliases': merged}, f, allow_unicode=True, default_flow_style=False)
+
+
+# ============================================================
 # 回写操作
 # ============================================================
 
@@ -623,6 +743,17 @@ def main():
     print(f'  边:   {stats["total_edges"]}')
     for et, count in sorted(stats['edge_types'].items()):
         print(f'    {et}: {count}')
+
+    # 7b. 别名自动发现
+    if not args.dry_run:
+        print('\n[7b/9] 别名自动发现...')
+        discovered = discover_aliases(extractions, resolver, kg)
+        if discovered:
+            aliases_path = os.path.join(KG_ROOT, 'config.aliases.yaml')
+            save_discovered_aliases(discovered, aliases_path)
+            print(f'  ✓ 发现 {len(discovered)} 组候选别名 → {aliases_path}')
+        else:
+            print('  - 未发现新的候选别名')
 
     # 8. 回写
     print('\n[8/9] 回写 enriched data...')

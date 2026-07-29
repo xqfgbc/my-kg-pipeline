@@ -69,23 +69,28 @@ def tokenize_query(query: str) -> List[str]:
 # 优化 3: 双语别名扩展（复用 EntityResolver 现有别名）
 # ============================================================
 
-def _load_alias_index() -> Dict[str, List[str]]:
-    """从 config.yaml 加载实体别名映射，构建反向索引。"""
+def _load_alias_index() -> Dict[str, str]:
+    """从 config.yaml + config.aliases.yaml 合并加载实体别名映射。"""
     alias_index = {}
-    try:
-        with open(CONFIG_PATH, 'r') as f:
-            config = yaml.safe_load(f) or {}
-        entity_aliases = config.get('entity_aliases', {})
-        for canonical, aliases in entity_aliases.items():
-            # 规范名 → 自身
-            alias_index[canonical.lower().strip()] = canonical
-            # 别名 → 规范名
-            for alias in aliases:
-                key = alias.lower().strip()
-                if key not in alias_index:
-                    alias_index[key] = canonical
-    except Exception:
-        pass
+    config_paths = [
+        CONFIG_PATH,                                          # 人工维护
+        os.path.join(KG_DIR, "config.aliases.yaml"),          # 自动发现
+    ]
+    for path in config_paths:
+        try:
+            with open(path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+            entity_aliases = data.get('entity_aliases', {})
+            for canonical, aliases in entity_aliases.items():
+                alias_index[canonical.lower().strip()] = canonical
+                for alias in aliases:
+                    key = alias.lower().strip()
+                    if key not in alias_index:
+                        alias_index[key] = canonical
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
     return alias_index
 
 
