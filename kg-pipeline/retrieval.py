@@ -31,9 +31,6 @@ sys.path.insert(0, KG_DIR)
 from kg_pipeline_config import get_vault_path
 VAULT_PATH = get_vault_path()
 
-# 环境变量控制回退到旧版
-USE_LEGACY = os.environ.get("KG_LEGACY_RETRIEVAL", "") == "1"
-
 
 def load_graph() -> Dict:
     with open(GRAPH_PATH, 'r') as f:
@@ -320,21 +317,16 @@ def main():
     query = ' '.join(sys.argv[1:])
     graph = load_graph()
 
-    if USE_LEGACY:
-        # 旧版回退（可通过 KG_LEGACY_RETRIEVAL=1 环境变量触发）
-        tokens = _legacy_tokenize(query)
-        matched = _legacy_match_entities(graph, tokens, top_k=8)
-    else:
-        # Step 1: jieba 分词 [优化1]
-        tokens = tokenize_query(query)
+    # Step 1: jieba 分词
+    tokens = tokenize_query(query)
 
-        # Step 2: 双语别名扩展 [优化3]
-        tokens = expand_bilingual(tokens)
+    # Step 2: 双语别名扩展
+    tokens = expand_bilingual(tokens)
 
-        # Step 3: TF-IDF + cosine 匹配 [优化2]
-        matched = match_entities(graph, tokens, top_k=8)
+    # Step 3: TF-IDF + cosine 实体匹配
+    matched = match_entities(graph, tokens, top_k=8)
 
-    # Step 4: 对每个匹配实体找到关联实体（图谱共现边遍历，不变）
+    # Step 4: 对每个匹配实体找到关联实体（图谱共现边遍历）
     entity_ids = [e['id'] for e in matched]
     all_related = {}
     for eid in entity_ids[:4]:
@@ -367,43 +359,6 @@ def main():
     }
 
     print(json.dumps(output, ensure_ascii=False, indent=2))
-
-
-# ============================================================
-# 旧版回退函数（保留，供 KG_LEGACY_RETRIEVAL=1 时使用）
-# ============================================================
-
-def _legacy_tokenize(query: str) -> List[str]:
-    """旧版 n-gram 分词（保留用于回退）."""
-    tokens = []
-    eng_words = re.findall(r'[A-Za-z]+', query)
-    tokens.extend(w.lower() for w in eng_words if len(w) >= 2)
-    chinese_chars = re.findall(r'[一-鿿]+', query)
-    for chunk in chinese_chars:
-        for wlen in range(2, min(7, len(chunk) + 1)):
-            for i in range(len(chunk) - wlen + 1):
-                tokens.append(chunk[i:i + wlen])
-    tokens.append(query.lower())
-    return list(set(tokens))
-
-
-def _legacy_match_entities(graph: Dict, tokens: List[str], top_k: int = 8) -> List[Dict]:
-    """旧版子串匹配（保留用于回退）."""
-    entities = [n for n in graph['nodes'] if n['type'] in ('entity', 'tag', 'topic')]
-    scored = []
-    for e in entities:
-        name = (e.get('canonical_name') or e.get('name') or '').lower()
-        score = 0
-        for token in tokens:
-            if token in name:
-                score += len(token) / len(name)
-            for p in e.get('provenance', []):
-                if token in str(p).lower():
-                    score += 0.1
-        if score > 0:
-            scored.append((score, e))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [e for _, e in scored[:top_k]]
 
 
 if __name__ == '__main__':
