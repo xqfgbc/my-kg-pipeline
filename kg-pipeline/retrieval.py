@@ -168,11 +168,15 @@ class EntityMatcher:
         return results
 
 
-def match_entities(graph: Dict, tokens: List[str], top_k: int = 8) -> List[Dict]:
-    """TF-IDF 版实体匹配（兼容旧接口）。"""
+def match_entities(graph: Dict, tokens: List[str], top_k: int = 8) -> Tuple[List[Dict], Dict[str, float]]:
+    """
+    TF-IDF 版实体匹配。返回（实体列表, {entity_id: score}）。
+    """
     matcher = EntityMatcher(graph)
     matched = matcher.search(tokens, top_k=top_k)
-    return [m['entity'] for m in matched]
+    entities = [m['entity'] for m in matched]
+    scores = {m['entity']['id']: m['score'] for m in matched}
+    return entities, scores
 
 
 def get_related_entities(graph: Dict, entity_id: str, top_k: int = 8) -> List[Tuple[str, float]]:
@@ -285,6 +289,49 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
     return unique
 
 
+def rerank_passages(
+    passages: List[Dict],
+    entity_scores: Dict[str, float],
+    query_tokens: List[str],
+) -> List[Dict]:
+    """
+    段落级重排序：结合实体匹配分 + 正文关键词命中分。
+    score = entity_score * 0.4 + body_keyword_score * 0.6
+    """
+    scored = []
+    for psg in passages:
+        entity_id = None
+        # 从 provenance 反查 entity_id（实体名 → entity:id）
+        for n in [n for n in _cached_graph_nodes() if n.get('canonical_name') == psg['entity']]:
+            entity_id = n['id']
+            break
+
+        entity_score = entity_scores.get(entity_id, 0.0)
+
+        # 正文关键词命中率
+        body_lower = psg.get('body', '').lower()
+        hits = sum(1 for t in query_tokens if t.lower() in body_lower)
+        body_score = hits / max(len(query_tokens), 1)
+
+        combined = entity_score * 0.4 + body_score * 0.6
+        scored.append((combined, psg))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [psg for _, psg in scored]
+
+
+# 缓存图谱节点（供 rerank 使用）
+_cached_nodes = None
+
+
+def _cached_graph_nodes():
+    global _cached_nodes
+    if _cached_nodes is None:
+        graph = load_graph()
+        _cached_nodes = graph['nodes']
+    return _cached_nodes
+
+
 def clean_slide_body(slide_content: str) -> str:
     """清洗幻灯片 Markdown 正文，去掉图片引用和无意义行，保留结构化内容。"""
     lines = []
@@ -358,7 +405,7 @@ def main():
     tokens = expand_bilingual(tokens)
 
     # Step 3: TF-IDF + cosine 实体匹配
-    matched = match_entities(graph, tokens, top_k=8)
+    matched, entity_scores = match_entities(graph, tokens, top_k=8)
 
     # Step 4: 对每个匹配实体找到关联实体（图谱共现边遍历）
     entity_ids = [e['id'] for e in matched]
@@ -369,9 +416,13 @@ def main():
             if name not in all_related or weight > all_related[name]:
                 all_related[name] = weight
 
-    # Step 5: 从原文提取相关摘要（provenance 定位 + 正则提取，不变）
-    search_entity_ids = entity_ids[:6]
+    # Step 5: 从原文提取完整幻灯片正文（provenance 定位）
+    search_entity_ids = entity_ids[:8]
     passages = extract_passages_from_docs(graph, search_entity_ids, VAULT_PATH)
+
+    # Step 5b: 段落级重排序（实体匹配分 + 正文关键词命中）
+    passages = rerank_passages(passages, entity_scores, tokens)
+    passages = passages[:8]  # top-8 最相关幻灯片
 
     # Step 6: 全文搜索补充
     fulltext = search_fulltext(query, VAULT_PATH, max_results=3)
@@ -388,7 +439,7 @@ def main():
             for e in matched
         ],
         "related_concepts": sorted(all_related.items(), key=lambda x: x[1], reverse=True)[:10],
-        "source_passages": passages[:12],
+        "source_passages": passages,
         "fulltext_matches": fulltext,
     }
 
