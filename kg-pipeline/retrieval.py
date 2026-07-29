@@ -201,7 +201,7 @@ def get_related_entities(graph: Dict, entity_id: str, top_k: int = 8) -> List[Tu
 def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -> List[Dict]:
     """
     根据实体 provenance 定位原文段落。
-    提取幻灯片摘要和关键正文。
+    提取幻灯片完整内容作为大模型语料，同时保留摘要用于快速预览。
     """
     passages = []
     seen = set()
@@ -223,7 +223,7 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
                             'entity': n.get('canonical_name', n['id']),
                         })
 
-    # 读取原文，提取摘要和正文
+    # 读取原文，提取完整幻灯片内容
     result = []
     doc_cache = {}
     for psg in passages[:30]:  # 限制数量
@@ -261,23 +261,53 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
         title_match = re.search(r'^## .+$', slide_content, re.MULTILINE)
         title = title_match.group(0).replace('## ', '') if title_match else psg['slide']
 
-        if summary:
+        # 清洗幻灯片正文：去掉 Markdown 图片引用和元信息行，保留结构化内容
+        body = clean_slide_body(slide_content)
+
+        if body.strip():
             result.append({
                 'doc': doc_path,
                 'slide': psg['slide'],
                 'title': title,
                 'summary': summary,
+                'body': body,
                 'entity': psg['entity'],
             })
 
-    # 去重
-    seen_summaries = set()
+    # 去重（按 slide 去重）
+    seen_slides = set()
     unique = []
     for r in result:
-        if r['summary'] not in seen_summaries:
-            seen_summaries.add(r['summary'])
+        key = (r['doc'], r['slide'])
+        if key not in seen_slides:
+            seen_slides.add(key)
             unique.append(r)
     return unique
+
+
+def clean_slide_body(slide_content: str) -> str:
+    """清洗幻灯片 Markdown 正文，去掉图片引用和无意义行，保留结构化内容。"""
+    lines = []
+    skip_patterns = [
+        r'^!\[.*\]\(asset/.*\)$',   # 图片引用
+        r'^>\s*\*?\*?📝\s*摘要',    # 摘要行（已有 summary 字段）
+        r'^>\s*\*?\*?🏷️\s*标签',    # 标签行
+        r'^>\s*\*?\*?原始文件',     # 元信息行
+        r'^---$',                    # 分隔线
+    ]
+    for line in slide_content.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(re.match(p, stripped) for p in skip_patterns):
+            continue
+        lines.append(line)
+
+    body = '\n'.join(lines).strip()
+    # 截断：单页幻灯片正文不超过 3000 字符，防止大模型上下文溢出
+    if len(body) > 3000:
+        body = body[:3000] + '\n\n[... 内容过长已截断 ...]'
+    return body
 
 
 def search_fulltext(query: str, vault: str, max_results: int = 5) -> List[Dict]:
