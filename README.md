@@ -4,11 +4,14 @@ AI/IT 运维领域知识图谱构建与检索管道。
 
 ## 检索效果
 
-| 指标 | 说明 |
+| 特性 | 说明 |
 |------|------|
-| **jieba 分词** | 中文分词替代 n-gram 暴力切词，token 精准度大幅提升 |
+| **jieba 分词** | 中文精确切词，替代 n-gram 暴力切分 |
 | **TF-IDF 匹配** | char_wb 字符级 n-gram + cosine similarity，消除短词偏差 |
-| **双语扩展** | 复用 EntityResolver 42 条中英别名映射，打通跨语言检索 |
+| **双语扩展** | 别名映射打通中英文跨语言检索 |
+| **完整正文** | 返回幻灯片完整内容作为大模型语料（非仅摘要） |
+| **段落重排序** | 实体匹配分 × 0.4 + 正文关键词命中 × 0.6 双重排序 |
+| **别名自动发现** | 管道运行时自动识别中英双语别名候选 |
 
 > 基准测试：实体命中 +33%，原文段落覆盖 +52%，跨语言检索提升最显著。
 
@@ -22,16 +25,20 @@ pip install -r requirements.txt
 cp config.local.yaml.example config.local.yaml
 # 编辑 config.local.yaml，将 vault_path 改为你的 Obsidian vault 路径
 
-# 3. 检查变更
+# 3. 配置实体别名（首次使用）
+cp config.aliases.local.yaml.example config.aliases.local.yaml
+# 编辑 config.aliases.local.yaml 添加中英双语别名映射
+
+# 4. 检查变更
 python check_changes.py
 
-# 4. 运行知识图谱管道
+# 5. 运行知识图谱管道（含别名自动发现）
 python kg-pipeline/pipeline.py
 
-# 5. 检索问答
+# 6. 检索问答
 python kg-pipeline/retrieval.py "你的问题"
 
-# 6. 同步 Dashboard
+# 7. 同步 Dashboard
 python convert_for_dashboard.py
 ```
 
@@ -39,58 +46,80 @@ python convert_for_dashboard.py
 
 ```
 .
-├── kg-pipeline/              # 知识图谱管道核心
-│   ├── pipeline.py           # 主管道脚本
-│   ├── retrieval.py          # 检索器 (v2: jieba + TF-IDF + 双语扩展)
-│   ├── config.yaml           # 默认配置
-│   ├── extractors/           # 内容提取器 (frontmatter/heading/inline-tag/wiki-link/outline)
-│   ├── graph/                # 图谱构建 (entity_resolver/cooccurrence/graph_model)
-│   └── output/               # 输出 (frontmatter_writer/json_export/wiki-link_injector)
-├── check_changes.py          # 变更检测 (对比 index_state.json)
-├── convert_for_dashboard.py  # Dashboard 可视化数据导出
-├── kg_pipeline_config.py     # 统一配置加载 (三层优先级)
-├── config.local.yaml.example # 本地配置模板
-└── requirements.txt          # Python 依赖
+├── kg-pipeline/                 # 知识图谱管道核心
+│   ├── pipeline.py              # 主管道（提取→图谱构建→别名发现→回写→导出）
+│   ├── retrieval.py             # 检索器（jieba+TF-IDF+双语扩展+重排序）
+│   ├── config.yaml              # 默认配置（提交到 Git）
+│   ├── extractors/              # 内容提取器
+│   ├── graph/                   # 图谱构建模块
+│   └── output/                  # 输出模块
+├── check_changes.py             # 变更检测
+├── convert_for_dashboard.py     # Dashboard 同步
+├── kg_pipeline_config.py        # 统一配置加载（三层优先级）
+├── config.local.yaml.example    # 本地配置模板（不提交）
+├── config.aliases.local.yaml    # 实体别名（不提交，本地维护）
+├── requirements.txt             # Python 依赖
+└── benchmark/                   # 基准测试数据（不提交）
 ```
 
 ## 配置
 
-三层优先级，后者覆盖前者：
+| 文件 | Git | 内容 |
+|------|-----|------|
+| `kg-pipeline/config.yaml` | ✅ 提交 | 管道参数、排除模式、阈值 |
+| `config.aliases.local.yaml` | ❌ 忽略 | 中英双语实体别名映射 |
+| `config.local.yaml` | ❌ 忽略 | vault_path 等本地路径 |
 
-| 优先级 | 方式 | 说明 |
-|--------|------|------|
-| 最高 | 环境变量 `KG_VAULT_PATH` | `export KG_VAULT_PATH=/path/to/vault` |
-| 中 | `config.local.yaml` | 本地文件，不提交到 Git |
-| 低 | `kg-pipeline/config.yaml` | 默认值与实体别名映射，提交到 Git |
+环境变量覆盖：
 
-## 工作原理
+| 变量 | 作用 |
+|------|------|
+| `KG_VAULT_PATH` | 覆盖 vault 路径（最高优先级） |
 
-```
-PPT/文档 → pipeline.py → graph.json
-                              ↓
-用户问题 → retrieval.py → 匹配实体 + 关联概念 + 原文段落 → JSON
-                              ↓
-                         kg-qa skill → 回答 + 来源追溯
-```
-
-### 检索流程 (retrieval.py v2)
+## 检索流程
 
 ```
 用户查询
   → jieba 分词 (中文精确切词 + 英文提取)
   → expand_bilingual (中→英 / 英→中 别名扩展)
-  → EntityMatcher (TF-IDF char_wb + cosine similarity)
+  → EntityMatcher (TF-IDF char_wb + cosine similarity → top-8 实体)
   → 图谱共现边扩展 (cooccurs_with)
-  → 原文定位 (provenance → 幻灯片摘要)
-  → 全文补充 (关键词匹配摘要行)
-  → JSON 输出
+  → 原文定位 (provenance → 提取完整幻灯片正文，去图片标签行，≤3000字)
+  → rerank_passages (实体分×0.4 + 正文命中×0.6 → top-8 幻灯片)
+  → 全文补充 (关键词匹配)
+  → JSON 输出 (body + summary + entity)
 ```
+
+### 输出字段
+
+| 字段 | 说明 |
+|------|------|
+| `matched_entities` | 匹配实体列表（含类型和文档数） |
+| `related_concepts` | 图谱共现关联概念 |
+| `source_passages[].body` | 完整幻灯片正文（≤3000字） |
+| `source_passages[].summary` | 幻灯片摘要（≤300字） |
+| `source_passages[].title` | 幻灯片标题 |
+| `source_passages[].doc` / `.slide` | 来源文档和幻灯片编号 |
 
 ## 实体别名
 
-在 `kg-pipeline/config.yaml` 的 `entity_aliases` 中维护中英双语映射。检索时会自动将中文查询词扩展为英文别名（反之亦然），实现跨语言检索。
+别名映射存储在本地文件 `config.aliases.local.yaml`（不提交到 Git）。
 
-当前支持：AgenticAI, 自主化运维, Observability, AIOps, ServiceNow, Dynatrace, MTTR, GenAI, IT运维, DevOps, SRE 等 11 组规范实体及其 42 条别名。
+### 手动维护
+
+```yaml
+entity_aliases:
+  "Observability":
+    - "可观测性"
+    - "Full-Stack Observability"
+  "AgenticAI":
+    - "Agentic AI"
+    - "Agentic"
+```
+
+### 自动发现
+
+管道运行时自动识别中英双语别名候选（子串匹配 + 归一化匹配），追加到同一文件。所有别名在检索时自动用于查询扩展。
 
 ## License
 

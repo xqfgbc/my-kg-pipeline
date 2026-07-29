@@ -1,0 +1,14 @@
+# config.aliases.local.yaml.example — 实体别名配置模板
+# 复制为 config.aliases.local.yaml 并添加你的中英双语别名映射
+
+# 格式:
+#   "规范名":
+#     - "别名1"
+#     - "别名2"
+#
+# 示例:
+#   "Observability":
+#     - "可观测性"
+#     - "Full-Stack Observability"
+
+entity_aliases: {}
