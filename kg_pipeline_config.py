@@ -22,7 +22,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # 配置文件路径
 _CONFIG_YAML = os.path.join(_PROJECT_ROOT, "kg-pipeline", "config.yaml")
-_CONFIG_ALIASES_YAML = os.path.join(_PROJECT_ROOT, "config.aliases.yaml")
+_CONFIG_ALIASES_YAML = os.path.join(_PROJECT_ROOT, "config.aliases.local.yaml")
 _CONFIG_LOCAL_YAML = os.path.join(_PROJECT_ROOT, "config.local.yaml")
 
 # 缓存

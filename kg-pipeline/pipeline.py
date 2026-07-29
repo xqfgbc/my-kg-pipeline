@@ -65,8 +65,8 @@ def load_config() -> Dict[str, Any]:
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f) or {}
 
-    # 合并自动发现的别名
-    aliases_path = os.path.join(KG_ROOT, 'config.aliases.yaml')
+    # 合并本地别名（不提交到 Git）
+    aliases_path = os.path.join(KG_ROOT, 'config.aliases.local.yaml')
     if os.path.exists(aliases_path):
         with open(aliases_path, 'r', encoding='utf-8') as f:
             auto = yaml.safe_load(f) or {}
@@ -527,7 +527,7 @@ def save_discovered_aliases(
     discovered: Dict[str, List[str]],
     output_path: str
 ) -> None:
-    """将发现的别名写入 config.aliases.yaml（保留已有条目，合并新增）。"""
+    """将发现的别名写入 config.aliases.local.yaml（保留已有条目，合并新增）。"""
     existing = {}
     if os.path.exists(output_path):
         with open(output_path, 'r') as f:
@@ -545,9 +545,8 @@ def save_discovered_aliases(
     # 写入 YAML
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
-        f.write('# config.aliases.yaml — 自动发现的实体别名映射\n')
-        f.write('# 由 pipeline.py 别名自动发现步骤生成，人工审核后可提交到 Git\n')
-        f.write('# 与 config.yaml 中的 entity_aliases 合并加载\n')
+        f.write('# config.aliases.local.yaml — 实体别名映射（本地，不提交到 Git）\n')
+        f.write('# 手动维护 + 管道自动发现合并，与 config.yaml 分开加载\n')
         f.write('\n')
         yaml.dump({'entity_aliases': merged}, f, allow_unicode=True, default_flow_style=False)
 

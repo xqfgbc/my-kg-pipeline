@@ -73,8 +73,7 @@ def _load_alias_index() -> Dict[str, str]:
     """从 config.yaml + config.aliases.yaml 合并加载实体别名映射。"""
     alias_index = {}
     config_paths = [
-        CONFIG_PATH,                                          # 人工维护
-        os.path.join(KG_DIR, "config.aliases.yaml"),          # 自动发现
+        os.path.join(KG_DIR, "config.aliases.local.yaml"),     # 本地别名（人工+自动）
     ]
     for path in config_paths:
         try:
