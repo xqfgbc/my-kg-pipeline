@@ -121,6 +121,44 @@ entity_aliases:
 
 管道运行时自动识别中英双语别名候选（子串匹配 + 归一化匹配），追加到同一文件。所有别名在检索时自动用于查询扩展。
 
+## Claude Code Skill — `/kg-qa`
+
+此项目同时是一个 Claude Code Skill，通过 `SKILL.md` 定义。`~/.claude/skills/kg-qa` 是指向本目录的符号链接。
+
+### 使用方式
+
+在 Claude Code 中直接调用：
+
+```
+/kg-qa <你的问题>
+```
+
+例如：
+
+```
+/kg-qa MTTR的意义
+/kg-qa AIOps怎么结合ServiceNow
+```
+
+### 工作原理
+
+1. 运行 `python kg-pipeline/retrieval.py "<问题>"` 检索知识图谱
+2. 提取匹配实体、共现概念、原文摘要
+3. 结合大模型生成带来源追溯的回答（每条引用附带 Obsidian 可点击深链接）
+
+### 技能文件
+
+| 文件 | 说明 |
+|------|------|
+| `SKILL.md` | Claude Code Skill 定义（工作流、URL 编码规则、注意事项） |
+
+### 符号链接
+
+```bash
+# 建立链接（一次性）
+ln -s /Users/bo.gong/Documents/accenture/AI应用/AI-KG ~/.claude/skills/kg-qa
+```
+
 ## License
 
 MIT
