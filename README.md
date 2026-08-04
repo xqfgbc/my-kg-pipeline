@@ -137,9 +137,14 @@ entity_aliases:
 
 管道运行时自动识别中英双语别名候选（子串匹配 + 归一化匹配），追加到同一文件。所有别名在检索时自动用于查询扩展。
 
-## Claude Code Skill — `/kg-qa`
+## Claude Code Skill
 
-此项目同时是一个 Claude Code Skill，通过 `SKILL.md` 定义。`~/.claude/skills/kg-qa` 是指向本目录的符号链接。
+本项目是 [KG Tools](https://github.com/xqfgbc/kg-tools) 工具链的后端实现，提供知识图谱管道和检索能力。对应的 Claude Code Skill 定义（`SKILL.md`）在 KG Tools 仓库中统一管理：
+
+| Skill | KG Tools 路径 | 本项目角色 |
+|-------|-------------|-----------|
+| `/kg-qa` | `kg-qa/SKILL.md` | 检索问答后端（`kg-pipeline/retrieval.py`） |
+| `/kg-update` | `kg-update/SKILL.md` | 图谱更新后端（`kg-pipeline/pipeline.py`、`check_changes.py`） |
 
 ### 使用方式
 
@@ -147,32 +152,18 @@ entity_aliases:
 
 ```
 /kg-qa <你的问题>
+/kg-update                 # 检查变更并增量更新图谱
 ```
-
-例如：
-
-```
-/kg-qa MTTR的意义
-/kg-qa AIOps怎么结合ServiceNow
-```
-
-### 工作原理
-
-1. 运行 `python kg-pipeline/retrieval.py "<问题>"` 检索知识图谱
-2. 提取匹配实体、共现概念、原文摘要
-3. 结合大模型生成带来源追溯的回答（每条引用附带 Obsidian 可点击深链接）
-
-### 技能文件
-
-| 文件 | 说明 |
-|------|------|
-| `SKILL.md` | Claude Code Skill 定义（工作流、URL 编码规则、注意事项） |
 
 ### 符号链接
 
 ```bash
-# 建立链接（一次性）
-ln -s /Users/bo.gong/Documents/accenture/AI应用/AI-KG ~/.claude/skills/kg-qa
+# 克隆 KG Tools（一次性）
+git clone https://github.com/xqfgbc/kg-tools.git ~/Documents/accenture/AI应用/kg-tools
+
+# 建立 skill 符号链接
+ln -s ~/Documents/accenture/AI应用/kg-tools/kg-qa ~/.claude/skills/kg-qa
+ln -s ~/Documents/accenture/AI应用/kg-tools/kg-update ~/.claude/skills/kg-update
 ```
 
 ## License
