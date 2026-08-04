@@ -9,9 +9,10 @@ AI/IT 运维领域知识图谱构建与检索管道。
 | **jieba 分词** | 中文精确切词，替代 n-gram 暴力切分 |
 | **TF-IDF 匹配** | char_wb 字符级 n-gram + cosine similarity，消除短词偏差 |
 | **双语扩展** | 别名映射打通中英文跨语言检索 |
-| **完整正文** | 返回幻灯片完整内容作为大模型语料（非仅摘要） |
+| **完整正文** | 返回幻灯片/章节完整内容作为大模型语料（非仅摘要） |
 | **段落重排序** | 实体匹配分 × 0.4 + 正文关键词命中 × 0.6 双重排序 |
 | **别名自动发现** | 管道运行时自动识别中英双语别名候选 |
+| **多文档格式** | 同时支持 ppt-extract（Slide 结构）和 web-pdf-extract（章节结构） |
 
 > 基准测试：实体命中 +33%，原文段落覆盖 +52%，跨语言检索提升最显著。
 
@@ -84,9 +85,12 @@ python convert_for_dashboard.py
   → expand_bilingual (中→英 / 英→中 别名扩展)
   → EntityMatcher (TF-IDF char_wb + cosine similarity → top-8 实体)
   → 图谱共现边扩展 (cooccurs_with)
-  → 原文定位 (provenance → 提取完整幻灯片正文，去图片标签行，≤3000字)
-  → rerank_passages (实体分×0.4 + 正文命中×0.6 → top-8 幻灯片)
-  → 全文补充 (关键词匹配)
+  → 原文定位 (provenance → 三种策略提取正文，去元信息行，≤3000字)
+      • Slide N → 匹配 ## Slide N 标题（ppt-extract 文档）
+      • 章节标题 → 匹配 ##/### 标题（web-pdf-extract 文档）
+      • unknown → 回退 ## 摘要 章节（文档级标签）
+  → rerank_passages (实体分×0.4 + 正文命中×0.6 → top-8)
+  → 全文补充 (双格式：📝 摘要行 + ## 摘要章节)
   → JSON 输出 (body + summary + entity)
 ```
 
@@ -96,10 +100,22 @@ python convert_for_dashboard.py
 |------|------|
 | `matched_entities` | 匹配实体列表（含类型和文档数） |
 | `related_concepts` | 图谱共现关联概念 |
-| `source_passages[].body` | 完整幻灯片正文（≤3000字） |
-| `source_passages[].summary` | 幻灯片摘要（≤300字） |
-| `source_passages[].title` | 幻灯片标题 |
-| `source_passages[].doc` / `.slide` | 来源文档和幻灯片编号 |
+| `source_passages[].body` | 完整正文（≤3000字） |
+| `source_passages[].summary` | 摘要（≤300字） |
+| `source_passages[].title` | 幻灯片标题或章节标题 |
+| `source_passages[].doc` / `.slide` | 来源文档和定位（Slide N / 章节名 / Document Summary） |
+
+### 支持的文档格式
+
+管道通过 inline_tag_extractor 的三种标签匹配模式和 retrieval 的三种原文定位策略，同时兼容两种上游提取格式：
+
+| 来源 | 标签格式（管道提取） | 内容定位（检索） |
+|------|---------------------|------------------|
+| ppt-extract | `> 🏷️ 标签:` / `> **🏷️ 标签**:` | `## Slide N` → 幻灯片正文 |
+| ppt-extract | `> **Tags**:` (English variant) | 同上 |
+| web-pdf-extract | `> **Tags**:` (document-level) | `## 章节标题` / `## 摘要` 回退 |
+
+> 对应的 Claude Code Skill: `~/.claude/skills/web-pdf-extract/` 和 `~/.claude/skills/ppt-extract/`
 
 ## 实体别名
 

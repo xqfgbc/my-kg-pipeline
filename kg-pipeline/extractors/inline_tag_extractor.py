@@ -58,18 +58,29 @@ def extract_inline_tags(content: str) -> List[str]:
 
 def extract_inline_tags_with_slide(content: str) -> List[Dict]:
     """
-    提取内联标签，同时关联所在幻灯片编号。
+    提取内联标签，同时关联所在幻灯片编号或最近标题。
     返回 [{'tag': str, 'slide': str}, ...]
+
+    - ppt-extract 文档: slide = "Slide N"（匹配 ## Slide N 标题）
+    - web-pdf-extract 等非 Slide 文档: slide = 最近 ## 或 ### 标题文本
     """
     results = []
     lines = content.split('\n')
     current_slide = None
 
     for i, line in enumerate(lines):
-        # 检测当前幻灯片标题
+        # 检测当前幻灯片标题（ppt-extract 文档）
         slide_match = re.match(r'^##\s+Slide\s+(\d+)', line, re.IGNORECASE)
         if slide_match:
             current_slide = f"Slide {slide_match.group(1)}"
+        else:
+            # 回退：检测普通 ##/### 标题（web-pdf-extract 等非 Slide 文档）
+            heading_match = re.match(r'^(#{2,3})\s+(.+)', line)
+            if heading_match:
+                title = heading_match.group(2).strip()
+                # 排除元信息标题（摘要、Tags 等）
+                if not re.match(r'^(摘要|Tags?|🔗|📋|相关文档|幻灯片目录)', title):
+                    current_slide = title
 
         # 匹配内联标签
         tag_match = INLINE_TAG_PATTERN.search(line)

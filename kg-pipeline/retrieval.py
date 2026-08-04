@@ -205,7 +205,10 @@ def get_related_entities(graph: Dict, entity_id: str, top_k: int = 8) -> List[Tu
 def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -> List[Dict]:
     """
     根据实体 provenance 定位原文段落。
-    提取幻灯片完整内容作为大模型语料，同时保留摘要用于快速预览。
+    支持两种文档结构：
+      - ppt-extract: slide = "Slide N" → 匹配 ## Slide N 标题
+      - web-pdf-extract: slide = 章节标题 → 匹配对应 ## 标题
+        slide = "unknown" → 回退到 ## 摘要 章节
     """
     passages = []
     seen = set()
@@ -227,7 +230,7 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
                             'entity': n.get('canonical_name', n['id']),
                         })
 
-    # 读取原文，提取完整幻灯片内容
+    # 读取原文，提取内容
     result = []
     doc_cache = {}
     for psg in passages[:30]:  # 限制数量
@@ -240,32 +243,73 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
                 continue
 
         content = doc_cache[doc_path]
-        slide_header = f"## {psg['slide']}"
+        slide_content = None
+        title = psg['slide']
+        summary = ''
 
-        # 找到对应幻灯片的位置
-        idx = content.find(slide_header)
-        if idx == -1:
-            continue
-
-        # 提取该幻灯片的内容（到下一个 ## 或文件末尾）
-        next_idx = content.find('\n## ', idx + len(slide_header))
-        if next_idx == -1:
-            slide_content = content[idx:]
+        # ---- 定位内容：分三种情况 ----
+        if psg['slide'] == 'unknown':
+            # 回退：提取 ## 摘要 章节作为文档级上下文
+            summary_match = re.search(
+                r'## 摘要\s*\n+(.*?)(?=\n(?:---|## |#> ))',
+                content, re.DOTALL
+            )
+            if summary_match:
+                slide_content = summary_match.group(0)
+                title = 'Document Summary'
+                # 提取摘要正文：跳过头行（## 摘要），取剩余文本
+                body_lines = slide_content.split('\n')[1:]  # skip heading
+                summary = ' '.join(
+                    l.strip() for l in body_lines
+                    if l.strip() and not l.startswith('#') and not l.startswith('>')
+                )[:300]
+            if not slide_content:
+                continue
+        elif re.match(r'^Slide\s+\d+', psg['slide']):
+            # ppt-extract: 匹配 ## Slide N
+            slide_header = f"## {psg['slide']}"
+            idx = content.find(slide_header)
+            if idx == -1:
+                continue
+            next_idx = content.find('\n## ', idx + len(slide_header))
+            if next_idx == -1:
+                slide_content = content[idx:]
+            else:
+                slide_content = content[idx:next_idx]
         else:
-            slide_content = content[idx:next_idx]
+            # web-pdf-extract: 匹配 ## 章节标题
+            slide_header = f"## {psg['slide']}"
+            idx = content.find(slide_header)
+            if idx == -1:
+                # 尝试 ### 子标题
+                slide_header = f"### {psg['slide']}"
+                idx = content.find(slide_header)
+            if idx == -1:
+                continue
+            next_idx = content.find('\n## ', idx + len(slide_header))
+            if next_idx == -1:
+                next_idx = content.find('\n### ', idx + len(slide_header))
+            if next_idx == -1:
+                slide_content = content[idx:]
+            else:
+                slide_content = content[idx:next_idx]
 
-        # 提取摘要
-        summary_match = re.search(
-            r'> \*?\*?📝\s*摘要\*?\*?[：:]\s*(.+?)(?:\n|$)',
-            slide_content
-        )
-        summary = summary_match.group(1) if summary_match else ''
+        # ---- 提取摘要（ppt-extract per-slide 格式） ----
+        if not summary:
+            summary_match = re.search(
+                r'> \*?\*?📝\s*摘要\*?\*?[：:]\s*(.+?)(?:\n|$)',
+                slide_content
+            )
+            summary = summary_match.group(1) if summary_match else ''
 
-        # 提取标题
+        # ---- 提取标题（非 Slide 类型用原始 slide 值） ----
         title_match = re.search(r'^## .+$', slide_content, re.MULTILINE)
-        title = title_match.group(0).replace('## ', '') if title_match else psg['slide']
+        if title_match:
+            title = title_match.group(0).replace('## ', '')
+        elif re.match(r'^Slide\s+\d+', psg['slide']):
+            title = psg['slide']
 
-        # 清洗幻灯片正文：去掉 Markdown 图片引用和元信息行，保留结构化内容
+        # ---- 清洗正文 ----
         body = clean_slide_body(slide_content)
 
         if body.strip():
@@ -278,13 +322,13 @@ def extract_passages_from_docs(graph: Dict, entity_ids: List[str], vault: str) -
                 'entity': psg['entity'],
             })
 
-    # 去重（按 slide 去重）
-    seen_slides = set()
+    # 去重
+    seen_keys = set()
     unique = []
     for r in result:
         key = (r['doc'], r['slide'])
-        if key not in seen_slides:
-            seen_slides.add(key)
+        if key not in seen_keys:
+            seen_keys.add(key)
             unique.append(r)
     return unique
 
@@ -338,8 +382,10 @@ def clean_slide_body(slide_content: str) -> str:
     skip_patterns = [
         r'^!\[.*\]\(asset/.*\)$',   # 图片引用
         r'^>\s*\*?\*?📝\s*摘要',    # 摘要行（已有 summary 字段）
-        r'^>\s*\*?\*?🏷️\s*标签',    # 标签行
+        r'^>\s*\*?\*?🏷️\s*标签',    # 标签行（ppt-extract）
+        r'^>\s*\*{0,2}Tags?\*{0,2}[：:]',   # 标签行（web-pdf-extract: > **Tags**: ...）
         r'^>\s*\*?\*?原始文件',     # 元信息行
+        r'^>\s*\*?\*?来源\*?\*?[：:]',  # 来源行（web-pdf-extract: > **来源**: ...）
         r'^---$',                    # 分隔线
     ]
     for line in slide_content.split('\n'):
@@ -358,7 +404,7 @@ def clean_slide_body(slide_content: str) -> str:
 
 
 def search_fulltext(query: str, vault: str, max_results: int = 5) -> List[Dict]:
-    """在 vault 所有 .md 文件中全文搜索。"""
+    """在 vault 所有 .md 文件中全文搜索，支持两种摘要格式。"""
     results = []
     keywords = [t for t in tokenize_query(query) if len(t) >= 2]
 
@@ -374,17 +420,36 @@ def search_fulltext(query: str, vault: str, max_results: int = 5) -> List[Dict]:
             except Exception:
                 continue
 
-            # 搜索摘要行
+            rel_path = os.path.relpath(filepath, vault)
+            matched = False
+
+            # 格式 1: ppt-extract — > 📝 摘要: ...（per-slide blockquote）
             for line in content.split('\n'):
                 if '📝 摘要' not in line:
                     continue
                 if any(kw.lower() in line.lower() for kw in keywords):
                     m = re.search(r'> \*?\*?📝\s*摘要\*?\*?[：:]\s*(.+)', line)
                     if m:
-                        rel_path = os.path.relpath(filepath, vault)
                         results.append({
                             'doc': rel_path,
                             'text': m.group(1),
+                        })
+                        matched = True
+                        break
+
+            # 格式 2: web-pdf-extract — ## 摘要 章节（document-level）
+            if not matched:
+                summary_section = re.search(
+                    r'## 摘要\s*\n+(.*?)(?=\n(?:---|## |#> ))',
+                    content, re.DOTALL
+                )
+                if summary_section:
+                    section_text = summary_section.group(1).strip()
+                    if any(kw.lower() in section_text.lower() for kw in keywords):
+                        # 截取前 300 字符
+                        results.append({
+                            'doc': rel_path,
+                            'text': section_text[:300],
                         })
 
     return results[:max_results]
