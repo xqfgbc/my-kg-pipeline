@@ -17,7 +17,7 @@ import json
 import hashlib
 import argparse
 import yaml
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, List, Set, Any, Optional, Tuple
 from pathlib import Path
 from collections import defaultdict
@@ -29,9 +29,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KG_ROOT = os.path.dirname(SCRIPT_DIR)  # 管道代码所在的项目根目录
 DATA_DIR = os.path.join(KG_ROOT, 'kg-pipeline-data')
 
-# 将管道目录加入 sys.path
+# 将管道目录与项目根目录加入 sys.path
+# （项目根目录用于 import kg_pipeline_config，与 check_changes.py 共用配置与扫描逻辑）
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
+if KG_ROOT not in sys.path:
+    sys.path.insert(0, KG_ROOT)
+
+from kg_pipeline_config import scan_vault_md_files  # noqa: E402
 
 from extractors.frontmatter_extractor import (
     parse_frontmatter, extract_tags, extract_aliases,
@@ -99,20 +104,42 @@ def load_config() -> Dict[str, Any]:
 # ============================================================
 
 def load_state() -> Dict[str, Any]:
-    """加载 index_state.json。"""
+    """加载 index_state.json。损坏时给出可操作的提示而不是裸 traceback。"""
     state_path = os.path.join(DATA_DIR, 'index_state.json')
-    if os.path.exists(state_path):
+    if not os.path.exists(state_path):
+        return {}
+
+    try:
         with open(state_path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {}
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"index_state.json 解析失败: {state_path}\n"
+            f"  {e}\n"
+            f"  该文件记录了每篇文档的提取结果，建图依赖它。\n"
+            f"  若确已损坏，从备份恢复，或删除该文件后重跑（会全量重新解析）。"
+        ) from e
 
 
 def save_state(state: Dict[str, Any]) -> None:
-    """保存 index_state.json。"""
+    """
+    保存 index_state.json（原子写）。
+
+    先写临时文件再 os.replace，避免序列化中途出错或进程被中断时
+    留下截断的 JSON —— 那会让下一轮 load_state() 直接崩溃，
+    而且要手工从备份恢复。index_state.json 现在承载着建图所需的
+    提取结果，损坏的代价比过去大得多。
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     state_path = os.path.join(DATA_DIR, 'index_state.json')
-    with open(state_path, 'w', encoding='utf-8') as f:
+    tmp_path = state_path + '.tmp'
+
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(tmp_path, state_path)
 
 
 def compute_file_hash(file_path: str) -> str:
@@ -125,61 +152,65 @@ def compute_file_hash(file_path: str) -> str:
 
 
 # ============================================================
+# 提取结果的持久化
+#
+# index_state.json 的每条记录同时承载「文件有没有变」和「这篇的提取结果」，
+# 建图时用全部文档的提取结果，因此未变更文件不必重新解析、图谱也不会被
+# 增量截断。两者放在同一条记录里，不可能不同步。
+#
+# 不存 content 正文：build_graph_from_extractions 不使用它，只有回写时才需要，
+# 而回写只发生在本轮已解析过的变更文件上。
+# ============================================================
+
+# 提取器输出结构变化时递增，使 state 里的旧结构失效并触发重新解析
+EXTRACTION_SCHEMA_VERSION = 1
+
+_STATE_EXCLUDED_FIELDS = ('content',)
+
+
+def _json_safe(value: Any) -> Any:
+    """
+    递归转成可 JSON 序列化的形式。
+
+    python-frontmatter 会把 YAML 里的 `created: 2026-08-04` 解析成 datetime.date，
+    直接 json.dump 会抛 TypeError。日期统一转成 ISO 字符串。
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def extraction_to_state(ext: Dict[str, Any]) -> Dict[str, Any]:
+    """把单篇提取结果转成可持久化的形式（去掉正文，带上 schema 版本）。"""
+    payload = {k: v for k, v in ext.items() if k not in _STATE_EXCLUDED_FIELDS}
+    payload['schema_version'] = EXTRACTION_SCHEMA_VERSION
+    return _json_safe(payload)
+
+
+def state_to_extraction(payload: Any) -> Optional[Dict[str, Any]]:
+    """
+    从 state 记录还原提取结果。
+
+    结构缺失或版本过期时返回 None —— 调用方据此判定该文件需要重新解析。
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get('schema_version') != EXTRACTION_SCHEMA_VERSION:
+        return None
+    return {k: v for k, v in payload.items() if k != 'schema_version'}
+
+
+# ============================================================
 # 文件扫描
 # ============================================================
 
-def should_exclude(
-    rel_path: str,
-    exclude_dirs: List[str],
-    exclude_patterns: List[str]
-) -> bool:
-    """判断文件是否应该被排除。"""
-    import fnmatch
-
-    # 检查目录排除
-    parts = rel_path.replace('\\', '/').split('/')
-    for d in exclude_dirs:
-        if d in parts:
-            return True
-
-    # 检查模式排除
-    for pattern in exclude_patterns:
-        if fnmatch.fnmatch(rel_path, pattern):
-            return True
-        # 也匹配路径中的任意位置
-        normalized = rel_path.replace('\\', '/')
-        if fnmatch.fnmatch('/' + normalized, pattern):
-            return True
-
-    return False
-
-
-def scan_vault_files(
-    vault_path: str,
-    exclude_dirs: List[str],
-    exclude_patterns: List[str]
-) -> Dict[str, str]:
-    """
-    扫描 vault 中所有 .md 文件。
-    返回 {relative_path: absolute_path}
-    """
-    files = {}
-    for root, dirs, _ in os.walk(vault_path):
-        # 过滤目录
-        dirs[:] = [d for d in dirs if not d.startswith('.') or d in ['.obsidian']]
-
-        for fname in os.listdir(root):
-            if not fname.endswith('.md'):
-                continue
-            abs_path = os.path.join(root, fname)
-            rel_path = os.path.relpath(abs_path, vault_path)
-
-            if should_exclude(rel_path, exclude_dirs, exclude_patterns):
-                continue
-
-            files[rel_path] = abs_path
-
-    return files
+# should_exclude / scan_vault_files 已上移到 kg_pipeline_config，
+# 与 check_changes.py 共用同一份实现，避免两边扫出的文件集不一致。
+scan_vault_files = scan_vault_md_files
 
 
 # ============================================================
@@ -570,6 +601,7 @@ def write_back_enrichments(
     create_backup = config.get('create_backup', True)
     auto_threshold = config.get('auto_inject_threshold', 0.5)
     suggest_threshold = config.get('suggest_threshold', 0.3)
+    exclude_tags = set(config.get('exclude_tags', []))
 
     stats = {
         'frontmatter_writes': 0,
@@ -591,6 +623,18 @@ def write_back_enrichments(
                     doc_entities.append(v.replace('entity:', '', 1))
                 elif v == doc_id and u.startswith('entity:'):
                     doc_entities.append(u.replace('entity:', '', 1))
+
+        # 过滤掉禁止作为标签的词（子串匹配、不区分大小写）。
+        # 管道是从**正文**派生标签的，而「封面/目录/附录/分隔页」这类结构性词汇
+        # 与公司名会从正文（页脚、"About <公司>" 章节）渗进来并沉淀到 tags 里。
+        # 上游 ppt-extract 有同样的禁用词表，但回写发生在上游之后，挡不住这里。
+        #
+        # 用子串而非精确匹配：这类词会组合出现（`Accenture内部`、`章节分隔页`），
+        # 精确匹配会漏。见 config.yaml 的 exclude_tags。
+        if exclude_tags:
+            lowered = [w.lower() for w in exclude_tags]
+            doc_entities = [t for t in doc_entities
+                            if not any(w in t.lower() for w in lowered)]
 
         enriched = enrich_frontmatter(
             ext['metadata'],
@@ -699,10 +743,40 @@ def main():
         print(f'    ~ {f}')
     print(f'  未变化:   {len(unchanged_files)}')
 
+    # 需要处理的文件（真正发生变更的）
     files_to_process = new_files + modified_files
-    if not files_to_process:
+
+    # 未变更的文件本可复用 state 里的提取结果，但下面两种情况必须重新解析：
+    #   - 记录里没有 extraction（启用本机制之前的存量记录）
+    #   - extraction 结构版本过期（提取器改过）
+    # 这类文件的 hash 没变，所以不会被 detect_changes 判为变更；必须在这里补判，
+    # 否则它们会悄无声息地掉出图谱 —— 这正是图谱被增量截断的表现。
+    # 注意：它们只参与建图，不回写（未变更就不该改写文件）。
+    stale_extraction = [
+        rel_path for rel_path in unchanged_files
+        if state_to_extraction(state.get(rel_path, {}).get('extraction')) is None
+    ]
+
+    # 本轮真正需要解析的文件 = 变更的 + 缓存失效的
+    files_to_parse = files_to_process + stale_extraction
+
+    # 已删除的文件：state 里有记录、vault 里已不存在。
+    # detect_changes 只对比「存在的文件」，看不出删除，必须在这里单独判定。
+    # 删除也算「有活要干」——否则只剩删除时会提前返回，图里仍留着已删文档的节点，
+    # 且 state 永远清不掉，check_changes 会一直报「已删除」并退出码 1。
+    deleted_files = [rel_path for rel_path in state if rel_path not in files]
+    if deleted_files:
+        print(f'  已删除:   {len(deleted_files)}')
+        for rel_path in deleted_files:
+            print(f'    - {rel_path}')
+
+    if not files_to_parse and not deleted_files:
         print('\n  ✅ 无文件变更，跳过处理。')
         return
+
+    if stale_extraction:
+        print(f'  提取缓存待补建: {len(stale_extraction)} 个文件'
+              f'（未变更，仅参与建图，不回写）')
 
     # 5. 实体解析器初始化
     print('\n[5/9] 初始化实体解析器...')
@@ -711,10 +785,11 @@ def main():
     print(f'  规范实体数: {len(resolver.get_canonical_names())}')
     print(f'  别名词条数: {len(resolver._alias_index)}')
 
-    # 6. 提取数据
-    print(f'\n[6/9] 提取结构化数据（{len(files_to_process)} 个文件）...')
+    # 6. 提取数据（仅未命中的文件真正读盘解析）
+    print(f'\n[6/9] 提取结构化数据（解析 {len(files_to_parse)} 个文件，'
+          f'其余 {len(files) - len(files_to_parse)} 个复用缓存）...')
     extractions = {}
-    for rel_path in files_to_process:
+    for rel_path in files_to_parse:
         abs_path = files[rel_path]
         print(f'  处理: {rel_path}')
         try:
@@ -729,6 +804,25 @@ def main():
             if args.verbose:
                 import traceback
                 traceback.print_exc()
+
+    # 6b. 未变更文件：从 state 还原提取结果，不重新打开文件。
+    # 图谱必须由「全部文档」构建：fm_related 的目标解析要遍历所有文档，
+    # 标签共现权重、文档相似度本身也是全局统计量。只喂变更文件会得到残缺的图。
+    reused = 0
+    for rel_path in unchanged_files:
+        if rel_path in extractions:
+            continue
+        cached = state_to_extraction(state.get(rel_path, {}).get('extraction'))
+        if cached is not None:
+            extractions[rel_path] = cached
+            reused += 1
+    print(f'  └ 复用缓存: {reused} 个文件')
+
+    # 只有发生变更的文件才回写（未变更的不改写、不产生新 .bak）
+    changed_extractions = {
+        rel_path: ext for rel_path, ext in extractions.items()
+        if rel_path in files_to_process
+    }
 
     # 7. 构建/更新图
     print('\n[7/9] 构建知识图谱...')
@@ -748,7 +842,7 @@ def main():
         print('\n[7b/9] 别名自动发现...')
         discovered = discover_aliases(extractions, resolver, kg)
         if discovered:
-            aliases_path = os.path.join(KG_ROOT, 'config.aliases.yaml')
+            aliases_path = os.path.join(KG_ROOT, 'config.aliases.local.yaml')
             save_discovered_aliases(discovered, aliases_path)
             print(f'  ✓ 发现 {len(discovered)} 组候选别名 → {aliases_path}')
         else:
@@ -759,12 +853,14 @@ def main():
     if args.dry_run:
         print('  ⚠ DRY-RUN 模式：仅预览，不实际修改文件')
 
+    # 相似度用全集算（wiki-link 推荐才是完整的）
     doc_similarities = compute_document_similarities(
         {rel_path: ext['all_tags'] for rel_path, ext in extractions.items()}
     )
 
+    # 回写只针对变更文件：未变更文件既不该被改写，也不该产生新 .bak
     writeback_stats = write_back_enrichments(
-        extractions, kg, doc_similarities, config, vault_path,
+        changed_extractions, kg, doc_similarities, config, vault_path,
         dry_run=args.dry_run
     )
 
@@ -786,16 +882,28 @@ def main():
         export_graph(graph_dict, output_path)
         print(f'  ✓ 导出 graph.json → {output_path}')
 
-        # 更新 index_state.json
-        new_state = dict(state)  # 保留旧状态
-        for rel_path in files_to_process:
+        # 更新 index_state.json —— 未变更条目的 mtime/hash/extraction 原样保留，
+        # 只刷新本轮解析过的（变更的 + 缓存失效的），并附上提取结果供下轮复用。
+        new_state = dict(state)
+        for rel_path in files_to_parse:
+            if rel_path not in extractions:
+                continue  # 该文件解析失败，保留旧记录
             abs_path = files[rel_path]
             new_state[rel_path] = {
                 'mtime': os.path.getmtime(abs_path),
                 'hash': compute_file_hash(abs_path),
+                'extraction': extraction_to_state(extractions[rel_path]),
             }
+
+        # 清理已删除文件的记录。否则 check_changes.py 的 `deleted_files` 永远非空，
+        # 每次都报「有变更」并退出码 1，而管道已无文件可处理。
+        removed = [rel_path for rel_path in new_state if rel_path not in files]
+        for rel_path in removed:
+            del new_state[rel_path]
+
         save_state(new_state)
-        print(f'  ✓ 更新 index_state.json ({len(new_state)} 条记录)')
+        print(f'  ✓ 更新 index_state.json ({len(new_state)} 条记录'
+              f'{f"，清理已删除 {len(removed)} 条" if removed else ""})')
 
         # 统计报告
         report = export_stats_report(stats, graph_dict)

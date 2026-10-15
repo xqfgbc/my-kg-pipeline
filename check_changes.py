@@ -12,7 +12,7 @@ import hashlib
 # 动态加载本地配置
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _PROJECT_ROOT)
-from kg_pipeline_config import get_vault_path
+from kg_pipeline_config import get_config, get_vault_path, scan_vault_md_files
 
 VAULT_PATH = get_vault_path()
 STATE_FILE = os.path.join(_PROJECT_ROOT, "kg-pipeline-data", "index_state.json")
@@ -26,17 +26,20 @@ def load_state():
 
 
 def scan_vault():
+    # 复用 pipeline 的扫描逻辑（含 exclude_dirs / exclude_patterns）。
+    # 两边必须扫出同一个文件集，否则会出现「check 说有变更、管道却无文件可处理」。
+    config = get_config()
+    md_files = scan_vault_md_files(
+        VAULT_PATH,
+        config.get('exclude_dirs', []),
+        config.get('exclude_patterns', []),
+    )
+
     files = {}
-    for root, dirs, _ in os.walk(VAULT_PATH):
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
-        for fname in os.listdir(root):
-            if fname.endswith('.md'):
-                abs_path = os.path.join(root, fname)
-                rel_path = os.path.relpath(abs_path, VAULT_PATH)
-                mtime = os.path.getmtime(abs_path)
-                with open(abs_path, 'rb') as f:
-                    h = hashlib.md5(f.read()).hexdigest()
-                files[rel_path] = {'mtime': mtime, 'hash': h}
+    for rel_path, abs_path in md_files.items():
+        with open(abs_path, 'rb') as f:
+            h = hashlib.md5(f.read()).hexdigest()
+        files[rel_path] = {'mtime': os.path.getmtime(abs_path), 'hash': h}
     return files
 
 

@@ -8,6 +8,8 @@ config.aliases.yaml
 
 # 生成数据（由管道运行时生成）
 kg-pipeline-data/
+# 管道数据的备份（手工 cp -R 产生的，如修复前的图谱快照）
+kg-pipeline-data.bak.*/
 .understand-anything/
 benchmark/
 

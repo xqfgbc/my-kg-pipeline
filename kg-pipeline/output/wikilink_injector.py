@@ -3,7 +3,7 @@ Wiki-Link 注入模块
 根据文档间相似度，自动向文档注入高置信度的 [[wiki-links]]。
 """
 import re
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def find_injection_point(content: str) -> int:
@@ -21,18 +21,64 @@ def find_injection_point(content: str) -> int:
     return 0
 
 
-def generate_related_section(target_doc: str, related_docs: List[Tuple[str, float]]) -> str:
+# 关联文档章节的两个标题。addToObsidian 早期写「相关文档」，管道写「关联文档」，
+# 二者语义相同，必须互认 —— 否则同一文件里会出现两个重复的关联章节。
+RELATED_HEADINGS = ('## 🔗 关联文档', '## 🔗 相关文档')
+
+_AUTO_NOTE = '> 以下关联由知识图谱管道自动生成（基于标签共现相似度）'
+
+
+def find_related_section(content: str) -> Optional[Tuple[int, int]]:
     """
-    生成 related 区域文本。
-    related_docs: [(doc_name, similarity_score), ...]
+    定位已有的关联文档章节，返回 (start, end)；没有则返回 None。
+    范围从标题行起，到下一个 H2 标题之前或文末为止。
     """
+    for heading in RELATED_HEADINGS:
+        idx = content.find(heading)
+        if idx == -1:
+            continue
+        # 要求独占一行，避免匹配到正文里对标题的引用
+        if idx > 0 and content[idx - 1] != '\n':
+            continue
+        next_h2 = re.search(r'\n## ', content[idx:])
+        end = idx + next_h2.start() if next_h2 else len(content)
+        return idx, end
+    return None
+
+
+def _split_trailing_separators(section: str) -> Tuple[str, List[str]]:
+    """
+    把章节末尾的分隔线（--- / *** / ___）与正文拆开。
+
+    关联章节后面常跟一条 --- 作为与下一节的视觉分隔。补充条目时必须插在
+    分隔线之前，否则分隔线会落到章节中间，把它劈成两半。
+    返回 (正文, 分隔线列表)。
+    """
+    body = section.rstrip()
+    separators: List[str] = []
+
+    while True:
+        m = re.search(r'(?:\A|\n)([ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*)$', body)
+        if not m:
+            break
+        separators.insert(0, m.group(1))
+        body = body[:m.start()].rstrip()
+
+    return body, separators
+
+
+def generate_related_entries(related_docs: List[Tuple[str, float]]) -> List[str]:
+    """生成关联条目行（不含章节标题）。"""
+    return [f'- [[{doc_name}]] — 相似度 {score:.2f}'
+            for doc_name, score in related_docs]
+
+
+def generate_related_section(related_docs: List[Tuple[str, float]]) -> str:
+    """生成一个全新的关联文档章节（文档中尚无该章节时使用）。"""
     if not related_docs:
         return ''
-
-    lines = ['\n## 🔗 关联文档\n']
-    lines.append('> 以下关联由知识图谱管道自动生成（基于标签共现相似度）\n')
-    for doc_name, score in related_docs:
-        lines.append(f'- [[{doc_name}]] — 相似度 {score:.2f}\n')
+    lines = ['\n## 🔗 关联文档\n\n', _AUTO_NOTE + '\n']
+    lines.extend(line + '\n' for line in generate_related_entries(related_docs))
     return ''.join(lines)
 
 
@@ -45,28 +91,43 @@ def auto_inject_wikilinks(
 ) -> Tuple[str, bool]:
     """
     自动注入高置信度 wiki-links（Jaccard >= threshold）。
-    通过在文档末尾添加「关联文档」章节实现。
-    返回 (new_content, changed)。
+
+    已有「关联文档」或「相关文档」章节时**就地补充**缺失的关联，保留该章节里
+    上游（addToObsidian）或人工撰写的条目与关系描述，不再新建重复章节。
+    返回 (new_content, changed)；已全部存在时 changed=False（幂等，不触发写盘）。
     """
     # 只保留超过阈值的关联
     high_confidence = [(name, score) for name, score in related_docs if score >= threshold]
     if not high_confidence:
         return content, False
 
-    # 检查是否已存在关联文档章节
-    if '## 🔗 关联文档' in content:
-        # 移除旧的自动生成部分，重新生成
-        content = re.sub(
-            r'\n## 🔗 关联文档\n.*?(?=\n## |\Z)',
-            '',
-            content,
-            flags=re.DOTALL
-        )
+    existing = find_related_section(content)
+    if existing is None:
+        return content.rstrip() + '\n' + generate_related_section(high_confidence), True
 
-    related_section = generate_related_section(file_path, high_confidence)
-    new_content = content.rstrip() + '\n' + related_section
+    start, end = existing
+    section = content[start:end]
 
-    return new_content, True
+    # 只补尚未出现的，不覆盖已有条目
+    missing = [(name, score) for name, score in high_confidence
+               if f'[[{name}]]' not in section]
+    if not missing:
+        return content, False
+
+    entries = ''.join(line + '\n' for line in generate_related_entries(missing))
+    body, separators = _split_trailing_separators(section)
+
+    if _AUTO_NOTE in section:
+        # 已有自动生成说明：条目直接续在现有的自动条目之后，避免空行把列表断开
+        new_section = body + '\n' + entries
+    else:
+        # 首次注入：空行分段，再写上说明与条目（此时 body 里是上游/人工的表格）
+        new_section = body + '\n\n' + _AUTO_NOTE + '\n' + entries
+
+    if separators:
+        new_section += '\n' + ''.join(line + '\n' for line in separators)
+
+    return content[:start] + new_section + content[end:], True
 
 
 def build_wikilink_recommendations(

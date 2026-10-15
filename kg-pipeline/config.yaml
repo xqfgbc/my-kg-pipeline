@@ -25,6 +25,26 @@ exclude_dirs:
 exclude_patterns:
   - "**/asset/**"
 
+# === 禁止写入文档 tags 的词 ===
+# 回写 enriched frontmatter 时，从图谱实体派生出的标签会先按此表过滤。
+#
+# 为什么需要：管道会把文档正文里出现的词抽成实体，再作为标签回写进 frontmatter。
+# 于是「封面」「目录」「附录」「分隔页」这类结构性词汇、以及公司/品牌名，
+# 会从正文（如 "About Accenture" 章节、页脚）渗进 tags 并沉淀下来。
+# 上游 ppt-extract 明令这些词不得作为标签，但**回写发生在上游之后**，
+# 只在上游过滤挡不住 —— 实测某次批量入库后，7 篇文档的 tags 里都有这类词。
+# 匹配方式为**包含**（不区分大小写）：标签里只要出现下列任一子串就被剔除。
+# 用包含而非精确匹配，是因为这类词会组合出现 —— 例如正文里的 "About Accenture"
+# 会被抽成 `Accenture内部`、结构页会被抽成 `章节分隔页`，精确匹配拦不住。
+exclude_tags:
+  - 埃森哲
+  - Accenture
+  - 目录
+  - 分隔页
+  - 封面
+  - 附录
+  - 占位页
+
 # === 实体别名映射 ===
 # ⚠️ 别名已迁移到 config.aliases.local.yaml（本地文件，不提交到 Git）
 # 复制 config.local.yaml.example 中的示例进行配置

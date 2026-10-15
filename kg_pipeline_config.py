@@ -13,9 +13,10 @@
     vault_path = config['vault_path']
     aliases = get_merged_aliases()
 """
+import fnmatch
 import os
 import yaml
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 # 项目根目录
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -104,3 +105,58 @@ def get_vault_path() -> str:
             "  2. 设置环境变量: export KG_VAULT_PATH=/path/to/vault"
         )
     return path
+
+
+# ============================================================
+# Vault 文件扫描（pipeline 与 check_changes 共用，避免两边文件集不一致）
+#
+# 曾经 check_changes.py 不过滤 exclude_dirs/exclude_patterns，而 pipeline.py 过滤，
+# 于是 check_changes 报「有变更」但管道无文件可处理。
+# ============================================================
+
+def should_exclude(
+    rel_path: str,
+    exclude_dirs: List[str],
+    exclude_patterns: List[str]
+) -> bool:
+    """判断 vault 相对路径是否应被排除。"""
+    normalized = rel_path.replace('\\', '/')
+
+    # 检查目录排除（按路径段精确匹配）
+    if any(d in normalized.split('/') for d in exclude_dirs):
+        return True
+
+    # 检查模式排除（同时匹配相对路径与其加上前导斜杠的形式）
+    for pattern in exclude_patterns:
+        if fnmatch.fnmatch(normalized, pattern):
+            return True
+        if fnmatch.fnmatch('/' + normalized, pattern):
+            return True
+
+    return False
+
+
+def scan_vault_md_files(
+    vault_path: str,
+    exclude_dirs: List[str],
+    exclude_patterns: List[str]
+) -> Dict[str, str]:
+    """
+    递归扫描 vault 中的 .md 文件。
+    返回 {相对路径: 绝对路径}。
+    """
+    files: Dict[str, str] = {}
+    for root, dirs, _ in os.walk(vault_path):
+        # 保留 .obsidian 供 should_exclude 按段过滤，其余隐藏目录直接跳过
+        dirs[:] = [d for d in dirs if not d.startswith('.') or d == '.obsidian']
+
+        for fname in os.listdir(root):
+            if not fname.endswith('.md'):
+                continue
+            abs_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(abs_path, vault_path)
+            if should_exclude(rel_path, exclude_dirs, exclude_patterns):
+                continue
+            files[rel_path] = abs_path
+
+    return files

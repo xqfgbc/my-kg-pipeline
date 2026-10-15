@@ -2,6 +2,8 @@
 python-pptx>=1.0.0
 Pillow>=10.0.0
 PyYAML>=6.0
+networkx>=3.0              # 图谱数据结构（pipeline + retrieval 必需）
+python-frontmatter>=1.0    # .md frontmatter 解析（extractors 必需）
 
 # 检索（v2 优化）
 jieba>=0.42
