@@ -67,8 +67,10 @@ python convert_for_dashboard.py
 
 | 文件 | Git | 内容 |
 |------|-----|------|
-| `kg-pipeline/config.yaml` | ✅ 提交 | 管道参数、排除模式、阈值 |
-| `config.aliases.local.yaml` | ❌ 忽略 | 中英双语实体别名映射 |
+| `kg-pipeline/config.yaml` | ✅ 提交 | 管道参数、排除模式、阈值、`exclude_tags` |
+| `kg-pipeline/aliases.curated.yaml` | ✅ 提交 | **人工别名**（kb 层读取） |
+| `kg-pipeline/aliases.mined.yaml` | ✅ 提交 | **自动挖掘的缩写对**（待审核，kb 层读取） |
+| `config.aliases.local.yaml` | ❌ 忽略 | 旧管道的运行时产物，**kb 层不读** |
 | `config.local.yaml` | ❌ 忽略 | vault_path 等本地路径 |
 
 环境变量覆盖：
@@ -79,31 +81,36 @@ python convert_for_dashboard.py
 
 ## 检索流程
 
+> **当前实现基于 `kb.sqlite`（阶段 1–3）**。旧的 `graph.json` 路径保留为降级方案
+> （`kb.sqlite` 缺失时自动使用）。完整方案见 `docs/KB_IMPROVEMENT_PLAN.md`。
+
 ```
 用户查询
-  → jieba 分词 (中文精确切词 + 英文提取)
-  → expand_bilingual (中→英 / 英→中 别名扩展)
-  → EntityMatcher (TF-IDF char_wb + cosine similarity → top-8 实体)
-  → 图谱共现边扩展 (cooccurs_with)
-  → 原文定位 (provenance → 三种策略提取正文，去元信息行，≤3000字)
-      • Slide N → 匹配 ## Slide N 标题（ppt-extract 文档）
-      • 章节标题 → 匹配 ##/### 标题（web-pdf-extract 文档）
-      • unknown → 回退 ## 摘要 章节（文档级标签）
-  → rerank_passages (实体分×0.4 + 正文命中×0.6 → top-8)
-  → 全文补充 (双格式：📝 摘要行 + ## 摘要章节)
-  → JSON 输出 (body + summary + entity)
+  → 归一化 (NFKC + 空白压缩)
+  → jieba 分词
+  → 别名扩展 (缩写↔全称 / 拼写变体；仅短查询启用)
+  → 阶段 1 · 文档路由：查询与标题/别名的重合度 ≥0.6 时，该文档的页直接进候选
+  → 阶段 2 · BM25 over slides_fts（标题×10 / 标签×6 / 正文×1）
+  → [可选] 向量召回 (KB_VECTORS=1，本地 bge-m3，分数归一化后加权融合)
+  → 按页取 top-8，组装 source_passages
+  → JSON 输出
 ```
+
+**关键设计**：路由是**召回**不是重排——实测某些文档的标题重合度为 1.0，
+但它的页根本不在 BM25 候选池里，只做重排救不回来。
 
 ### 输出字段
 
 | 字段 | 说明 |
 |------|------|
-| `matched_entities` | 匹配实体列表（含类型和文档数） |
-| `related_concepts` | 图谱共现关联概念 |
-| `source_passages[].body` | 完整正文（≤3000字） |
-| `source_passages[].summary` | 摘要（≤300字） |
-| `source_passages[].title` | 幻灯片标题或章节标题 |
-| `source_passages[].doc` / `.slide` | 来源文档和定位（Slide N / 章节名 / Document Summary） |
+| `matched_entities[]` | `{name, type, doc_count}` —— 命中术语及覆盖文档数 |
+| `related_concepts` | `[[name, weight], ...]` —— **同页共现**，证据可回溯到具体页 |
+| `source_passages[]` | `{doc, slide, title, summary, body, entity}` |
+| `source_passages[].doc` | vault 相对路径（`<目录>/<文件>.md`），`kg-qa` 用它拼 Obsidian 链接 |
+| `source_passages[].slide` / `.title` | 页标题（如 `Slide 12: xxx`） |
+| `fulltext_matches[]` | `{doc, text}` —— 排名之外的补充页片段 |
+
+> 输出结构刻意与旧版保持一致，`kg-qa` 无需改动。
 
 ### 支持的文档格式
 

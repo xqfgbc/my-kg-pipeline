@@ -1,0 +1,19 @@
+# 自动挖掘的「全称 → 缩写」对（**待人工审核**）
+#
+# 来源：vault 里的 `Full Name (ABBR)` 模式 + 首字母校验。
+# 这个文件**不会被 kb 层自动加载**；审核后把确认的条目并入 aliases.curated.yaml。
+# 重新生成：python kg-pipeline/mine_aliases.py
+
+abbreviations:
+  APP: Accenture Products and Platforms
+  BCM: Business Continuity Management
+  COTS: Commercial Off-The-Shelf
+  ETB: Enterprise Technology Blueprint
+  IAM: Identity and Access Management
+  IP: Intellectual property
+  KMS: Un-supervised Knowledge Management System
+  M&A: Mergers and Acquisitions
+  MCP: Model Context Protocol
+  OAM: Operationalize-Accelerate-Modernize
+  OSS: Open Source Software
+  SRE: Site Reliability Engineering

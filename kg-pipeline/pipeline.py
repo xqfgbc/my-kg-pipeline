@@ -65,7 +65,7 @@ from output.json_export import export_graph, export_stats_report
 # ============================================================
 
 def load_config() -> Dict[str, Any]:
-    """加载并合并 config.yaml + config.aliases.yaml + config.local.yaml 配置。"""
+    """加载并合并 config.yaml + config.aliases.local.yaml + config.local.yaml 配置。"""
     config_path = os.path.join(SCRIPT_DIR, 'config.yaml')
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f) or {}

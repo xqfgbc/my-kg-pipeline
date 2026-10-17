@@ -24,6 +24,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KG_DIR = os.path.dirname(SCRIPT_DIR)
 GRAPH_PATH = os.path.join(KG_DIR, "kg-pipeline-data", "graph.json")
+# 新的主检索源（SQLite + BM25）。缺失时 run_query 会降级到 graph.json 旧路径。
+KB_PATH = os.path.join(KG_DIR, "kg-pipeline-data", "kb.sqlite")
 CONFIG_PATH = os.path.join(KG_DIR, "kg-pipeline", "config.yaml")
 
 # 动态加载本地配置
@@ -70,7 +72,7 @@ def tokenize_query(query: str) -> List[str]:
 # ============================================================
 
 def _load_alias_index() -> Dict[str, str]:
-    """从 config.yaml + config.aliases.yaml 合并加载实体别名映射。"""
+    """从 config.aliases.local.yaml 加载实体别名映射（旧路径；kb 层不读它）。"""
     alias_index = {}
     config_paths = [
         os.path.join(KG_DIR, "config.aliases.local.yaml"),     # 本地别名（人工+自动）
@@ -455,46 +457,29 @@ def search_fulltext(query: str, vault: str, max_results: int = 5) -> List[Dict]:
     return results[:max_results]
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "请提供查询问题"}, ensure_ascii=False))
-        sys.exit(1)
+def legacy_query(query: str) -> Dict:
+    """旧路径：TF-IDF 实体匹配 + 图遍历 + 摘要行子串扫描。
 
-    query = ' '.join(sys.argv[1:])
+    保留为**降级路径**：kb.sqlite 不存在或读取失败时使用，
+    保证「先跑 kg-qa、后跑 kg-update」不会崩。
+    """
     graph = load_graph()
 
-    # Step 1: jieba 分词
-    tokens = tokenize_query(query)
+    tokens_ = expand_bilingual(tokenize_query(query))
+    matched, entity_scores = match_entities(graph, tokens_, top_k=8)
 
-    # Step 2: 双语别名扩展
-    tokens = expand_bilingual(tokens)
-
-    # Step 3: TF-IDF + cosine 实体匹配
-    matched, entity_scores = match_entities(graph, tokens, top_k=8)
-
-    # Step 4: 对每个匹配实体找到关联实体（图谱共现边遍历）
     entity_ids = [e['id'] for e in matched]
     all_related = {}
     for eid in entity_ids[:4]:
-        related = get_related_entities(graph, eid, top_k=5)
-        for name, weight in related:
+        for name, weight in get_related_entities(graph, eid, top_k=5):
             if name not in all_related or weight > all_related[name]:
                 all_related[name] = weight
 
-    # Step 5: 从原文提取完整幻灯片正文（provenance 定位）
-    search_entity_ids = entity_ids[:8]
-    passages = extract_passages_from_docs(graph, search_entity_ids, VAULT_PATH)
-
-    # Step 5b: 段落级重排序（实体匹配分 + 正文关键词命中）
-    passages = rerank_passages(passages, entity_scores, tokens)
-    passages = passages[:8]  # top-8 最相关幻灯片
-
-    # Step 6: 全文搜索补充
+    passages = extract_passages_from_docs(graph, entity_ids[:8], VAULT_PATH)
+    passages = rerank_passages(passages, entity_scores, tokens_)[:8]
     fulltext = search_fulltext(query, VAULT_PATH, max_results=3)
 
-    # 组装输出（JSON schema 不变）
-    output = {
-        "query": query,
+    return {
         "matched_entities": [
             {
                 "name": e.get('canonical_name', e['id']),
@@ -507,6 +492,41 @@ def main():
         "source_passages": passages,
         "fulltext_matches": fulltext,
     }
+
+
+def run_query(query: str) -> Dict:
+    """优先走 SQLite/BM25；不可用时降级到旧路径。"""
+    try:
+        from kb.retrieve import load_kb, search as kb_search
+    except Exception:
+        return legacy_query(query)
+
+    if not os.path.exists(KB_PATH):
+        return legacy_query(query)
+
+    try:
+        conn = load_kb(KB_PATH)
+        try:
+            result = kb_search(conn, query)
+        finally:
+            conn.close()
+        return result
+    except Exception:
+        if os.environ.get('KG_STRICT'):
+            raise
+        return legacy_query(query)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"error": "请提供查询问题"}, ensure_ascii=False))
+        sys.exit(1)
+
+    query = ' '.join(sys.argv[1:])
+
+    # 组装输出（JSON schema 与旧版完全一致）
+    output = {"query": query}
+    output.update(run_query(query))
 
     print(json.dumps(output, ensure_ascii=False, indent=2))
 

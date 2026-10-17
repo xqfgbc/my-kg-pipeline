@@ -2,10 +2,13 @@
 统一配置加载器。
 
 加载顺序（后者覆盖前者）：
-1. config.yaml（默认值 + 人工别名，提交到 Git）
-2. config.aliases.yaml（自动发现别名，提交到 Git）
+1. kg-pipeline/config.yaml（默认值，提交到 Git）
+2. config.aliases.local.yaml（运行时产物：自动发现 + 人工补充，不提交）
 3. config.local.yaml（本地覆盖，不提交到 Git）
 4. 环境变量（运行时覆盖）
+
+⚠️ 历史文档里写的 `config.aliases.yaml` 已废弃 —— 没有任何代码加载它
+（`grep` 只在注释里出现）。kb 层用的是 `kg-pipeline/aliases.{curated,mined}.yaml`。
 
 用法:
     from kg_pipeline_config import get_config, get_merged_aliases
@@ -51,7 +54,10 @@ def _deep_merge(base: Dict, overlay: Dict) -> Dict:
 
 
 def get_merged_aliases(force_reload: bool = False) -> Dict[str, Any]:
-    """合并 config.yaml + config.aliases.yaml 的 entity_aliases。"""
+    """合并 config.yaml + config.aliases.local.yaml 的 entity_aliases。
+
+    （旧路径使用；kb 层改用 kg-pipeline/aliases.{curated,mined}.yaml）
+    """
     global _aliases_cache
     if _aliases_cache is not None and not force_reload:
         return _aliases_cache

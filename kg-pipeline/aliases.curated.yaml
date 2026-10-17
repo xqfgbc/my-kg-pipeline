@@ -1,0 +1,52 @@
+# 人工/历史沉淀的别名。已剔除「中文组合词 ← 内嵌英文短词」这类错误映射。
+#
+# 规则见 kb/aliases.py：中文组合词里的英文短词**不是**它的别名
+#   （`Agent治理 → Agent`、`BuildBuy权衡 → Build` 都是反例）。
+# 本文件进版本库；config.aliases.local.yaml 是运行时产物，kb 层不读它。
+
+entity_aliases:
+  AIOps:
+  - AI Operations
+  - AI Ops
+  - AI-Powered IT Operations
+  - AI驱动的运维
+  AgenticAI:
+  - Agentic
+  - Agentic AI
+  - Agentic Workflow
+  - Agentic Workflows
+  - agentic
+  DevOps:
+  - Dev Ops
+  Dynatrace:
+  - Davis AI
+  - Dynatrace Davis AI
+  - Smartscape
+  GenAI:
+  - Generative AI
+  - LLM
+  - 生成式AI
+  IT运维:
+  - IT Operations
+  - IT Ops
+  - IT运营
+  MTTR:
+  - Mean-Time-to-Resolve
+  - 平均解决时间
+  Observability:
+  - Full-Stack Observability
+  - observability
+  - 企业可观测性
+  - 全栈可观测性
+  - 可观测性
+  SRE:
+  - Site Reliability Engineering
+  ServiceNow:
+  - Now Platform
+  - SNOW
+  - ServiceNow ITOM
+  - servicenow
+  自主化运维:
+  - Autonomous
+  - Autonomous IT Operations
+  - Autonomous Operations
