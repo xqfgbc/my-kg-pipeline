@@ -26,7 +26,7 @@ from typing import Dict, List, Tuple
 import frontmatter
 
 # 不进入索引的章节（实测它们会稳定抢答，见方案文档）
-EXCLUDE_HEADING = re.compile(r'🔗\s*(关联文档|相关文档)|幻灯片目录')
+EXCLUDE_HEADING = re.compile(r'🔗\s*(关联文档|相关文档)|幻灯片目录|报告目录')
 # ppt-extract 的页标题：`Slide 12: 标题`
 SLIDE_HEADING = re.compile(r'^Slide\s+(\d+)\s*[:：]\s*(.*)$')
 # 标签行 / 摘要行
