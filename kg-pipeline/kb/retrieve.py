@@ -52,7 +52,14 @@ def load_kb(db_path: str) -> sqlite3.Connection:
 
 # ---------------------------------------------------------------- 文档先验
 def _doc_prior(conn: sqlite3.Connection, terms: List[str]) -> Dict[str, float]:
-    """每个文档的标题/别名与查询词的重合度，归一化到 [0,1]。"""
+    """每个文档的标题/别名与查询词的重合度，归一化到 [0,1]。
+
+    保持朴素的 `|交集| / |查询词|`。曾试过按 IDF 加权以压低 `ai` 这类通用词，
+    但任何改变分母语义的做法都会让长查询的先验虚高、误触发整篇路由
+    （纯 IDF：B @1 84%→61%；加基线权重的 IDF：C 85%→82%）。
+    带 "AI" 的短查询曾被错误扩张掩盖得更严重——真正的问题是别名包含匹配
+    把 `ai` 展开成 aiops/genai/运维（见 aliases.expand），不是先验公式。
+    """
     q = set(terms)
     prior: Dict[str, float] = {}
     for row in conn.execute('SELECT doc_id, title, aliases FROM docs'):

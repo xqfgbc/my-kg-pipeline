@@ -35,6 +35,7 @@ MAX_EXPANSION = 40                                 # 防止一次扩展把查询
 
 _INDEX = None
 _FORMS = None
+_CJK = re.compile(r'[一-鿿]')
 
 
 def _load(use_mined: bool = True):
@@ -105,8 +106,17 @@ def expand(terms, use_mined: bool = True):
                 push(form)
             continue
         # 包含匹配：`可观测` ↔ `可观测性`
-        if len(nt) >= 2:
+        #
+        # ⚠️ **只对中文词生效。**英文按子串匹配会灾难性扩张：
+        #   `ai` 是 `aiops` / `genai` / `agenticai` 的子串，于是查询
+        #   「AI 是不是泡沫」被扩成 aiops / operations / 运维 / dynatrace /
+        #   genai / 生成式… 共 19 个不相关词，BM25 完全被 IT 运维文档淹没
+        #   （实测 Talk Track 的 BM25 第 1 名在最终结果里连 top-8 都进不去）。
+        # 中文里 `可观测`→`可观测性` 这类前缀缩略是常见写法，才值得做包含匹配。
+        if len(nt) >= 2 and _CJK.search(nt):
             for key, canon in _INDEX.items():
+                if not _CJK.search(key):
+                    continue
                 if abs(len(key) - len(nt)) > MAX_LEN_DIFF:
                     continue
                 if nt in key or key in nt:

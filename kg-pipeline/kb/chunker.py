@@ -37,6 +37,7 @@ H1 = re.compile(r'^#\s+(.+)$', re.M)
 BACKTICK = re.compile(r'`([^`]+)`')
 
 MAX_PART_CHARS = 4000          # bge-m3 的安全上限（8,192 token 留余量）
+SUBSECTION_MIN_CHARS = 1500    # 超过此长度的 `##` 章节按 `###` 细分后再索引
 TABLE_ROW = re.compile(r'^\s*\|')
 
 
@@ -155,33 +156,29 @@ def parse_document(abs_path: str, doc_id: str, rel_path: str = '') -> Tuple[Dict
     heads = list(HEADING.finditer(body))
     slides: List[Dict] = []
 
-    for i, h in enumerate(heads):
-        heading = h.group(1).strip()
-        if EXCLUDE_HEADING.search(heading):
-            continue
-        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
-        section = body[h.end():end].strip()
-        section = re.sub(r'\n-{3,}\s*$', '', section).strip()
-
+    def meta_of(text: str):
         tags = []
-        for line in section.split('\n'):
+        for line in text.split('\n'):
             if '🏷️' in line:
                 tags = [t.strip() for t in BACKTICK.findall(line) if t.strip()]
                 break
-        m = SUMMARY_LINE.search(section)
+        m = SUMMARY_LINE.search(text)
         summary = m.group(1).strip() if m else ''
-
         # 标签行不进入正文（避免与 tags 列重复计分）；摘要行保留
-        clean = TAG_LINE.sub('', section).strip()
+        return tags, summary, TAG_LINE.sub('', text).strip()
 
+    def emit(heading, text, tags, summary, parent=''):
+        clean = TAG_LINE.sub('', text).strip()
         sm = SLIDE_HEADING.match(heading)
         kind = 'slide' if sm else ('summary' if '总体概要' in heading else 'other')
-
+        path = '%s > %s' % (title, heading)
+        if parent:
+            path = '%s > %s > %s' % (title, parent, heading)
         slides.append({
             'doc_id': doc_id,
-            'seq': i,
+            'seq': len(slides),
             'heading': heading,
-            'heading_path': '%s > %s' % (title, heading),
+            'heading_path': path,
             'body': clean,
             'tags': tags,
             'summary': summary,
@@ -190,6 +187,34 @@ def parse_document(abs_path: str, doc_id: str, rel_path: str = '') -> Tuple[Dict
             'slide_no': int(sm.group(1)) if sm else None,
             'parts': _split_parts(clean),
         })
+
+    for i, h in enumerate(heads):
+        heading = h.group(1).strip()
+        if EXCLUDE_HEADING.search(heading):
+            continue
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+        section = body[h.end():end].strip()
+        section = re.sub(r'\n-{3,}\s*$', '', section).strip()
+
+        tags, summary, _ = meta_of(section)
+
+        # 长章节按 `###` 细分：报告/Talk Track 这类文档把具体主题放在三级标题下，
+        # 整章作为一个 BM25 块会把主题权重稀释掉（实测「AI 泡沫」「岗位影响」
+        # 都打不中 Reactive Modules 这一大块）。PPT 文档没有 `###`，不受影响。
+        sub_heads = list(re.finditer(r'^###\s+(.+)$', section, re.M))
+        if len(section) > SUBSECTION_MIN_CHARS and sub_heads:
+            pre = section[:sub_heads[0].start()].strip()
+            if pre:
+                emit(heading, pre, tags, summary)
+            for j, sh in enumerate(sub_heads):
+                send = sub_heads[j + 1].start() if j + 1 < len(sub_heads) else len(section)
+                body_j = section[sh.end():send].strip()
+                sub_tags, sub_summary, _ = meta_of(body_j)
+                emit(sh.group(1).strip(), body_j,
+                     sub_tags or tags, sub_summary, parent=heading)
+            continue
+
+        emit(heading, section, tags, summary)
 
     return doc, slides
 
